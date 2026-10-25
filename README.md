@@ -195,12 +195,14 @@ The bot also watches club events whose **name contains a word you choose**:
 
 - **Group classes** (Gruppenstunden) come from the club's public page. No login needed.
 - **Open Play events** (like "Newcomer Club mit Coach David") have no public
-  list, so the bot reads them with **your Playtomic login**. Double-click
-  **`playtomic-login.bat`** once. Your password is sent to Playtomic once and
+  list, so the bot reads them with **your Playtomic login**. Send **`/login`**
+  to the bot in Telegram (or double-click **`playtomic-login.bat`** on the
+  laptop). In Telegram, your password passes through Telegram's servers; the
+  bot deletes that message right away and never logs it. Your password is sent to Playtomic once and
   **not saved**; only the login token Playtomic returns is kept in
   `playtomic_token.json` (never uploaded; keep it private). The bot only
-  *reads* the event list; it never books or pays. `py -m padel_bot logout`
-  deletes the token.
+  *reads* the event list; it never books or pays. `/logout` (or
+  `py -m padel_bot logout`) deletes the token.
 
 What you get in Telegram:
 

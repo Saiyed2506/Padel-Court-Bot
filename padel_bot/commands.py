@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Callable
 
 from .notify import NotifyError, booking_link, build_messages
+from .playtomic import PlaytomicError
 from .wishes import MAX_WISHES, WishError, WishStore, describe, parse_wish
 
 log = logging.getLogger("padel_bot")
@@ -34,7 +35,10 @@ HELP = """🎾 Padel bot commands
 Events (classes, Open Play):
 /events - upcoming dates of watched events
 /watch <name> - watch events with this in their name
-/unwatch <number> - stop watching (see /events)"""
+/unwatch <number> - stop watching (see /events)
+/login - log in to Playtomic for Open Play events
+/logout - forget the Playtomic login
+/cancel - stop a login in progress"""
 
 # Shown in Telegram's "/" menu.
 MENU = [
@@ -46,6 +50,7 @@ MENU = [
     ("events", "Upcoming watched events"),
     ("watch", "Watch an event name: /watch Afterwork"),
     ("unwatch", "Stop watching an event name"),
+    ("login", "Log in to Playtomic (Open Play)"),
     ("pause", "Stop alerts"),
     ("resume", "Start alerts again"),
     ("help", "All commands"),
@@ -63,6 +68,10 @@ class CommandCenter:
         self.sleep = sleep
         self.offset: int | None = None
         self.ignored_chats: set[str] = set()
+        # Telegram login in two steps (email, then password); never stored or logged.
+        self.login_step: str | None = None
+        self.login_email = ""
+        self.login_started = 0.0
 
     # --- the commands ----------------------------------------------------
 
@@ -86,6 +95,12 @@ class CommandCenter:
 
         if command in ("/start", "/help"):
             return HELP
+        if command in ("/login", "/logout"):
+            return self._login_command(command)
+        if command == "/cancel":
+            was = self.login_step
+            self.login_step, self.login_email = None, ""
+            return "Login cancelled." if was else "Nothing to cancel."
         if command == "/wishes":
             return self.wishes_text()
         if command == "/wish":
@@ -174,6 +189,64 @@ class CommandCenter:
         except NotifyError as exc:
             log.warning("Could not set the Telegram command menu: %s", exc)
 
+    # --- Playtomic login via chat ------------------------------------------
+
+    LOGIN_TIMEOUT_S = 300
+
+    def _account(self):
+        events = self.watcher.events
+        return events.account if events is not None else None
+
+    def _login_command(self, command: str) -> str:
+        account = self._account()
+        if account is None:
+            return "Event watching is off, so there's nothing to log in for."
+        if command == "/logout":
+            account.logout()
+            self.login_step = None
+            return "Logged out: the Playtomic login token was deleted. Open Play events are no longer read."
+        self.login_step, self.login_email, self.login_started = "email", "", self.monotonic()
+        return ("🔐 Playtomic login for Open Play events (read-only, the bot never books or pays).\n\n"
+                "Heads-up: what you type here passes through Telegram's servers. I delete your password "
+                "message right after reading it and never save the password - only Playtomic's login token.\n\n"
+                "Step 1/2: send your Playtomic email.  (/cancel to stop)")
+
+    def _login_input(self, text: str, message_id) -> str:
+        if self.monotonic() - self.login_started > self.LOGIN_TIMEOUT_S:
+            self.login_step = None
+            self._delete(message_id)  # might be a password; don't leave it lying around
+            return "The login timed out. Send /login to start again."
+        if self.login_step == "email":
+            if "@" not in text or " " in text.strip():
+                return "That doesn't look like an email address. Send your Playtomic email, or /cancel."
+            self.login_email, self.login_step = text.strip(), "password"
+            return "Step 2/2: send your Playtomic password. I'll delete the message right away."
+        # password step
+        deleted = self._delete(message_id)
+        email, self.login_step, self.login_email = self.login_email, None, ""
+        note = "" if deleted else "\n\n⚠️ I couldn't delete your password message - please delete it yourself (long-press → Delete)."
+        try:
+            self._account().login(email, text)
+        except PlaytomicError as exc:
+            return f"❌ Login failed: {exc}\nSend /login to try again.{note}"
+        finally:
+            text = ""  # drop our reference to the password
+        events = self.watcher.events
+        events.open_play_problem = None
+        events.last_check = None
+        self.watcher.request_check()
+        return f"✅ Logged in to Playtomic. Password not saved. Checking events now.{note}"
+
+    def _delete(self, message_id) -> bool:
+        if message_id is None:
+            return False
+        try:
+            self.notifier.delete_message(message_id)
+            return True
+        except (NotifyError, AttributeError) as exc:
+            log.warning("Could not delete a message: %s", exc)
+            return False
+
     def process(self, updates: list[dict]) -> None:
         for update in updates:
             self.offset = int(update.get("update_id", 0)) + 1
@@ -187,9 +260,13 @@ class CommandCenter:
                     log.warning("Ignoring a message from an unknown Telegram chat (%s)", chat_id)
                     self.ignored_chats.add(chat_id)
                 continue
-            log.info("Command from you: %s", text[:60])
+            in_login = self.login_step is not None and not text.startswith("/")
+            log.info("Command from you: %s", "(login details - hidden)" if in_login else text[:60])
             try:
-                reply = self.handle(text)
+                if in_login:
+                    reply = self._login_input(text, message.get("message_id"))
+                else:
+                    reply = self.handle(text)
             except Exception:  # a bug in one command must not stop the watcher
                 log.exception("Command failed")
                 reply = "Sorry, something went wrong with that command."

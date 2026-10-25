@@ -878,3 +878,85 @@ class AccountTests(unittest.TestCase):
             acc._request = fake
             with self.assertRaisesRegex(AuthError, "Google or Apple"):
                 acc.login("me@example.com", "wrong")
+
+
+class TelegramLoginTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.commands import CommandCenter
+        from padel_bot.wishes import WishStore
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = settings(Path(self.tmp.name))
+        self.now = datetime(2026, 10, 25, 12, 0, tzinfo=TZ)
+        self.telegram = FakeTelegram()
+        self.telegram.deleted = []
+        self.telegram.delete_message = lambda mid: self.telegram.deleted.append(mid)
+        self.watcher = Watcher(self.s, FakeClient(), CLUB, self.telegram, SeenState(self.s.state_file), TZ,
+                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               clock=lambda: self.now, sleep=lambda s: None)
+
+        class Account:
+            logged_in = False
+            attempts = []
+            def login(acc, email, password):
+                acc.attempts.append((email, password))
+                if password != "right":
+                    from padel_bot.account import AuthError
+                    raise AuthError("Playtomic didn't accept that email/password.")
+                acc.logged_in = True
+            def logout(acc):
+                acc.logged_in = False
+
+        class Events:
+            account = Account()
+            open_play_problem = "not logged in"
+            last_check = self.now
+
+        self.watcher.events = Events()
+        self.clock = [0.0]
+        self.cc = CommandCenter(self.watcher, self.telegram, WishStore(Path(self.tmp.name) / "w.json", self.s.windows),
+                                monotonic=lambda: self.clock[0])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def msg(self, update_id, text):
+        return {"update_id": update_id, "message": {"message_id": 100 + update_id, "chat": {"id": 42}, "text": text}}
+
+    def test_login_deletes_password_and_never_logs_it(self):
+        logging.disable(logging.NOTSET)
+        try:
+            with self.assertLogs("padel_bot", level="INFO") as logs:
+                self.cc.process([self.msg(1, "/login"), self.msg(2, "me@example.com"), self.msg(3, "right")])
+        finally:
+            logging.disable(logging.CRITICAL)
+        self.assertIn("Step 1/2", self.telegram.sent[0])
+        self.assertIn("Step 2/2", self.telegram.sent[1])
+        self.assertIn("✅ Logged in", self.telegram.sent[2])
+        self.assertEqual(self.telegram.deleted, [103])            # the password message
+        self.assertTrue(self.watcher.events.account.logged_in)
+        self.assertIsNone(self.watcher.events.last_check)          # events re-checked right away
+        self.assertTrue(self.watcher.check_requested)
+        self.assertFalse(any("right" in line or "me@example.com" in line for line in logs.output))
+        self.assertIsNone(self.cc.login_step)
+
+    def test_wrong_password_cancel_and_timeout(self):
+        self.cc.process([self.msg(1, "/login"), self.msg(2, "not an email"), self.msg(3, "me@example.com"),
+                         self.msg(4, "wrong")])
+        self.assertIn("doesn't look like an email", self.telegram.sent[1])
+        self.assertIn("❌ Login failed", self.telegram.sent[-1])
+        self.assertEqual(self.telegram.deleted, [104])
+        self.assertIn("Login cancelled", self.cc.handle("/login") and self.cc.handle("/cancel"))
+        self.cc.process([self.msg(5, "/login")])
+        self.clock[0] += 301
+        self.cc.process([self.msg(6, "me@example.com")])
+        self.assertIn("timed out", self.telegram.sent[-1])
+        self.assertEqual(self.telegram.deleted[-1], 106)
+        # outside a login, normal text isn't treated as a password
+        self.cc.process([self.msg(7, "right")])
+        self.assertIn("/help", self.telegram.sent[-1])
+        self.assertEqual(self.watcher.events.account.attempts, [("me@example.com", "wrong")])
+
+    def test_logout(self):
+        self.watcher.events.account.logged_in = True
+        self.assertIn("Logged out", self.cc.handle("/logout"))
+        self.assertFalse(self.watcher.events.account.logged_in)

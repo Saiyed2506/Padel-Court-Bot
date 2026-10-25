@@ -119,21 +119,21 @@ class PlaytomicAccount:
     def _refresh(self) -> None:
         refresh = self.token.get("refresh_token")
         if not refresh or _expired(self.token.get("refresh_token_expiration"), margin_s=0):
-            raise AuthError("Playtomic login expired - double-click playtomic-login.bat to log in again.")
+            raise AuthError("Playtomic login expired - send /login to the bot to log in again.")
         try:
             token = self._request("POST", "/v3/auth/token",
                                   body={"refresh_token": refresh, "requested_user_roles": ROLES})
         except PlaytomicError as exc:
             if exc.status in (400, 401, 403):
-                raise AuthError("Playtomic login expired - double-click playtomic-login.bat to log in again.") from None
+                raise AuthError("Playtomic login expired - send /login to the bot to log in again.") from None
             raise
         if not isinstance(token, dict) or not token.get("access_token"):
-            raise AuthError("Playtomic refused to renew the login - double-click playtomic-login.bat.")
+            raise AuthError("Playtomic refused to renew the login - send /login to the bot.")
         self._save(token)
 
     def _access_token(self) -> str:
         if not self.logged_in:
-            raise AuthError("Not logged in to Playtomic - double-click playtomic-login.bat.")
+            raise AuthError("Not logged in to Playtomic - send /login to the bot.")
         if not self.token.get("access_token") or _expired(self.token.get("access_token_expiration")):
             self._refresh()
         return self.token["access_token"]
@@ -150,7 +150,7 @@ class PlaytomicAccount:
             return self._request("GET", path, query=query, bearer=self.token["access_token"])
         except PlaytomicError as exc:
             if exc.status == 401:
-                raise AuthError("Playtomic rejected the login - double-click playtomic-login.bat.") from None
+                raise AuthError("Playtomic rejected the login - send /login to the bot.") from None
             raise
 
     # --- the one thing we read ---------------------------------------------

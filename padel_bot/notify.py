@@ -91,6 +91,9 @@ class TelegramNotifier:
             params["offset"] = str(offset)
         return self._call("getUpdates", params, timeout_s=timeout + 15).get("result", [])
 
+    def delete_message(self, message_id) -> None:
+        self._call("deleteMessage", {"chat_id": self.chat_id, "message_id": str(message_id)})
+
     def set_commands(self, commands: list[tuple[str, str]]) -> None:
         menu = [{"command": c, "description": d} for c, d in commands]
         self._call("setMyCommands", {"commands": json.dumps(menu)})

@@ -277,7 +277,7 @@ class EventWatcher:
 
     def _open_play(self, words: list[str], now: datetime, today: date) -> list[Event]:
         if self.account is None or not self.account.logged_in:
-            raise AuthError("Not logged in to Playtomic - double-click playtomic-login.bat.")
+            raise AuthError("Not logged in to Playtomic - send /login here (or double-click playtomic-login.bat).")
         raws = self.account.list_tournaments(self.club.tenant_id, now.astimezone(timezone.utc))
         found = []
         for raw in raws:
