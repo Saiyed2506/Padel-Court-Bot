@@ -34,12 +34,21 @@ def write_env_values(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
 
 
-def set_tenant_id(config_path: Path, tenant_id: str) -> None:
+def _set_config_string(config_path: Path, key: str, value: str) -> None:
     text = config_path.read_text(encoding="utf-8")
-    new, count = re.subn(r'(?m)^tenant_id\s*=\s*".*"$', f'tenant_id = "{tenant_id}"', text, count=1)
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    new, count = re.subn(rf'(?m)^{key}\s*=\s*".*"$', lambda _: f'{key} = "{escaped}"', text, count=1)
     if count != 1:
-        raise ValueError("could not find the tenant_id line in config.toml")
+        raise ValueError(f"could not find the {key} line in config.toml")
     config_path.write_text(new, encoding="utf-8")
+
+
+def set_tenant_id(config_path: Path, tenant_id: str) -> None:
+    _set_config_string(config_path, "tenant_id", tenant_id)
+
+
+def set_booking_url(config_path: Path, url: str) -> None:
+    _set_config_string(config_path, "booking_url", url)
 
 
 def _ask(prompt: str) -> str:
@@ -117,7 +126,7 @@ def setup_telegram(env_path: Path) -> TelegramNotifier:
 def setup_club(config_path: Path) -> None:
     _step(3, "Find Padel Amigos on Playtomic")
     settings = load_settings(config_path, require_tenant=False)
-    client = PlaytomicClient(settings.user_agent)
+    client = PlaytomicClient(settings.user_agent, settings.api_base_url)
     clubs = client.find_clubs(53.6333, 9.8500, 15000)
     found = [c for c in clubs if "amigos" in c.name.lower()]
     if not found:
@@ -148,7 +157,10 @@ def run_setup(config_path: Path, run_check) -> int:
         setup_club(config_path)
     except PlaytomicError as exc:
         print(f"\nCouldn't reach Playtomic: {exc}")
-        if "getaddrinfo" in str(exc) or "11001" in str(exc):
+        if exc.status == 401:
+            print("Playtomic now asks for a login to see this. Tell Claude; the bot needs\n"
+                  "a small update for that (it would use your Playtomic account).")
+        elif "getaddrinfo" in str(exc) or "11001" in str(exc):
             print("Your laptop could not find the address api.playtomic.io. Telegram worked, so\n"
                   "your internet is fine; a company network, VPN, or security/ad-blocking\n"
                   "software may be blocking it. Send a screenshot of this to Claude.")
@@ -163,7 +175,14 @@ def run_setup(config_path: Path, run_check) -> int:
     print("A test message was sent to Telegram. Tap the link in it.")
     opens = _ask("Did the link open Padel Amigos in Playtomic? (y/n): ").lower()
     if not opens.startswith("y"):
-        print("OK - tell Claude where it went instead; the alerts still work, only the link needs fixing.")
+        print("Let's use the club's own link instead. In the Playtomic app, open Padel Amigos,\n"
+              "tap the Share button and choose Copy (or send it to yourself and copy it).")
+        url = _ask("Paste the club link here (or just press Enter to skip): ")
+        if url.startswith("http"):
+            set_booking_url(config_path, url)
+            print("Saved. Alerts will use this link.")
+        else:
+            print("Skipped - alerts still work, only the link may not open the club.")
 
     _step(5, "Compare times with the Playtomic app")
     print("Below is every free slot on the watched courts for today and tomorrow.")

@@ -42,11 +42,13 @@ def parse_price(text: str) -> float | None:
         return None
 
 
-def parse_availability(raw: list[dict], courts: dict[str, Court], tz: tzinfo) -> list[Slot]:
+def parse_availability(raw: list[dict], courts: dict[str, Court], tz: tzinfo,
+                       times_are_utc: bool = True) -> list[Slot]:
     """Flatten the API reply into Slot objects in local time.
 
-    The API gives `start_date` + `start_time` in UTC (confirmed by the
-    open-source padel-cli client; verify with `py -m padel_bot check --all`).
+    Sources disagree on whether `start_date` + `start_time` are UTC (padel-cli)
+    or club local time (go-playtomic-api), hence the `api_times` setting.
+    Verify with `py -m padel_bot check --all`.
     """
     slots: list[Slot] = []
     for resource in raw:
@@ -58,7 +60,7 @@ def parse_availability(raw: list[dict], courts: dict[str, Court], tz: tzinfo) ->
             if len(start_time) == 5:
                 start_time += ":00"
             try:
-                start_utc = datetime.fromisoformat(f"{day}T{start_time}").replace(tzinfo=timezone.utc)
+                naive = datetime.fromisoformat(f"{day}T{start_time}")
                 duration = int(item.get("duration", 0))
             except ValueError:
                 continue
@@ -66,7 +68,7 @@ def parse_availability(raw: list[dict], courts: dict[str, Court], tz: tzinfo) ->
             slots.append(Slot(
                 resource_id=resource_id,
                 court_name=court.name if court else resource_id,
-                start=start_utc.astimezone(tz),
+                start=naive.replace(tzinfo=timezone.utc).astimezone(tz) if times_are_utc else naive.replace(tzinfo=tz),
                 duration=duration,
                 price_eur=parse_price(price_text),
                 price_text=price_text,

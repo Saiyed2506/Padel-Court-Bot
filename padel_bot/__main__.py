@@ -30,7 +30,7 @@ def telegram_from_env() -> TelegramNotifier:
 
 
 def cmd_find_club(args, settings: Settings) -> int:
-    client = PlaytomicClient(settings.user_agent)
+    client = PlaytomicClient(settings.user_agent, settings.api_base_url)
     clubs = client.find_clubs(args.lat, args.lon, args.radius)
     term = args.search.lower()
     found = [c for c in clubs if term in c.name.lower()] if term else clubs
@@ -53,7 +53,7 @@ def cmd_find_club(args, settings: Settings) -> int:
 def cmd_check(args, settings: Settings) -> int:
     """One pass over all days, printed to the screen. Sends nothing, saves nothing."""
     tz = club_timezone()
-    client = PlaytomicClient(settings.user_agent)
+    client = PlaytomicClient(settings.user_agent, settings.api_base_url)
     club = client.get_club(settings.tenant_id)
     courts = {c.resource_id: c for c in club.courts}
     wanted = [c.name for c in club.courts if court_is_wanted(c, settings)]
@@ -67,7 +67,8 @@ def cmd_check(args, settings: Settings) -> int:
             time.sleep(random.uniform(*settings.request_pause_s))
         day = now.date() + timedelta(days=offset)
         start_utc, end_utc = local_day_bounds_utc(day, tz)
-        slots = parse_availability(client.get_availability(settings.tenant_id, start_utc, end_utc), courts, tz)
+        slots = parse_availability(client.get_availability(settings.tenant_id, start_utc, end_utc), courts, tz,
+                                   settings.api_times_utc)
         if args.all:
             # Everything free on watched courts, any time: compare this with the app
             # to confirm the times are converted correctly.
@@ -122,7 +123,7 @@ def cmd_run(args, settings: Settings) -> int:
     if settings.auto_book.enabled:
         log.warning("Auto-book is ON in DRY-RUN mode (max €%g): it will only log what it would do.",
                     settings.auto_book.max_price_eur)
-    watcher = Watcher(settings, PlaytomicClient(settings.user_agent), notifier,
+    watcher = Watcher(settings, PlaytomicClient(settings.user_agent, settings.api_base_url), notifier,
                       SeenState(settings.state_file), tz, booker)
     if not watcher.load_courts():
         raise ConfigError("No courts match [courts] in config.toml; nothing to watch.")

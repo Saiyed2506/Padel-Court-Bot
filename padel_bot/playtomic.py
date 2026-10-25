@@ -14,7 +14,8 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 
-BASE_URL = "https://api.playtomic.io/v1"
+# The app moved here in 2026; the old https://api.playtomic.io/v1 no longer answers.
+BASE_URL = "https://api.app.playtomic.io/v1"
 
 
 class PlaytomicError(Exception):
@@ -64,12 +65,13 @@ def _parse_club(raw: dict) -> Club:
 
 
 class PlaytomicClient:
-    def __init__(self, user_agent: str, timeout_s: float = 20.0):
+    def __init__(self, user_agent: str, base_url: str = BASE_URL, timeout_s: float = 20.0):
         self.user_agent = user_agent
+        self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
 
     def _get(self, path: str, params: dict[str, str] | None = None):
-        url = f"{BASE_URL}{path}"
+        url = f"{self.base_url}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
         request = urllib.request.Request(
@@ -82,7 +84,8 @@ class PlaytomicClient:
             # 429 = slow down, 5xx = their problem: both worth retrying later.
             # Other 4xx usually mean the endpoint changed or we were blocked.
             retryable = exc.code == 429 or exc.code >= 500
-            raise PlaytomicError(f"HTTP {exc.code} for {path}", status=exc.code, retryable=retryable) from None
+            hint = " (Playtomic now wants a login for this)" if exc.code == 401 else ""
+            raise PlaytomicError(f"HTTP {exc.code} for {path}{hint}", status=exc.code, retryable=retryable) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             raise PlaytomicError(f"network error for {path}: {exc}") from None
         except json.JSONDecodeError:

@@ -9,6 +9,11 @@ tenant_id = ""
 # `py -m padel_bot test-notify`; if it doesn't open your club, replace it with
 # the club's URL copied from your browser on playtomic.com.
 booking_url = "https://app.playtomic.io/tenant/{tenant_id}"
+# Playtomic's (unofficial) API address. It moved in 2026; change only if told to.
+api_base_url = "https://api.app.playtomic.io/v1"
+# Are the API's slot times in "utc" or "local" (Hamburg) time? Sources disagree.
+# If `check --all` shows times 1-2 hours off from the app, switch this.
+api_times = "utc"
 
 [courts]
 indoor_only = true

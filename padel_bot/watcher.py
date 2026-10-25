@@ -92,7 +92,7 @@ class Watcher:
     def fetch_matches(self, day: date, now: datetime) -> list[Slot]:
         start_utc, end_utc = local_day_bounds_utc(day, self.tz)
         raw = self.client.get_availability(self.settings.tenant_id, start_utc, end_utc)
-        slots = parse_availability(raw, self.courts, self.tz)
+        slots = parse_availability(raw, self.courts, self.tz, self.settings.api_times_utc)
         return find_matches(slots, self.courts, self.settings, now, target_day=day)
 
     def run_round(self) -> list[Slot]:

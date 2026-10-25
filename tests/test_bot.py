@@ -104,6 +104,14 @@ class RuleTests(unittest.TestCase):
         got = [(m.start.strftime("%H:%M"), m.court_name, m.preferred) for m in matches]
         self.assertEqual(got, [("16:30", "Court 1", True), ("16:00", "Court 1", False), ("18:30", "Court 1", False)])
 
+    def test_local_time_mode(self):
+        raw = [avail("c1", "2026-11-03", ("16:30:00", 90, "48 EUR"))]
+        utc_slot = parse_availability(raw, COURTS, TZ)[0]
+        local_slot = parse_availability(raw, COURTS, TZ, times_are_utc=False)[0]
+        self.assertEqual(utc_slot.start.strftime("%H:%M"), "17:30")
+        self.assertEqual(local_slot.start.strftime("%H:%M"), "16:30")
+        self.assertEqual(local_slot.key, "c1|2026-11-03T15:30|90")
+
     def test_weekend_window(self):
         raw = [avail("c2", "2026-10-31",  # Saturday, winter time
                      ("08:00:00", 90, "50 EUR"),   # 09:00 too early
@@ -134,6 +142,8 @@ class RuleTests(unittest.TestCase):
 class ConfigTests(unittest.TestCase):
     def test_shipped_config_loads(self):
         s = load_settings(REPO / "config.toml", require_tenant=False)
+        self.assertEqual(s.api_base_url, "https://api.app.playtomic.io/v1")
+        self.assertTrue(s.api_times_utc)
         self.assertFalse(s.auto_book.enabled)
         self.assertTrue(s.auto_book.dry_run)
         self.assertEqual(s.days_ahead, 14)
@@ -352,6 +362,15 @@ class SetupWizardTests(unittest.TestCase):
             path.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
             set_tenant_id(path, "abc-123")
             self.assertEqual(load_settings(path).tenant_id, "abc-123")
+
+    def test_set_booking_url(self):
+        from padel_bot.setup_wizard import set_booking_url
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
+            set_booking_url(path, "https://playtomic.com/clubs/padel-amigos?x=1&y=\\2")
+            self.assertEqual(load_settings(path, require_tenant=False).booking_url,
+                             "https://playtomic.com/clubs/padel-amigos?x=1&y=\\2")
 
     def test_full_wizard_flow(self):
         from unittest import mock

@@ -39,6 +39,8 @@ class AutoBookSettings:
 class Settings:
     tenant_id: str
     club_name: str
+    api_base_url: str
+    api_times_utc: bool
     booking_url: str
     indoor_only: bool
     court_size: str               # "double", "single" or "any"
@@ -134,6 +136,13 @@ def _auto_book(raw: dict) -> AutoBookSettings:
     return AutoBookSettings(enabled=enabled, dry_run=dry_run, max_price_eur=max_price)
 
 
+def _api_times_utc(value: str) -> bool:
+    value = str(value).lower()
+    if value not in ("utc", "local"):
+        raise ConfigError('club.api_times must be "utc" or "local"')
+    return value == "utc"
+
+
 def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings:
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
@@ -180,6 +189,8 @@ def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings
     return Settings(
         tenant_id=tenant_id,
         club_name=str(club.get("name", "your club")),
+        api_base_url=str(club.get("api_base_url", "https://api.app.playtomic.io/v1")),
+        api_times_utc=_api_times_utc(club.get("api_times", "utc")),
         booking_url=str(club.get("booking_url", "")),
         indoor_only=bool(courts.get("indoor_only", True)),
         court_size=size,
