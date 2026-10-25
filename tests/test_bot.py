@@ -650,3 +650,10 @@ class ExploreTests(unittest.TestCase):
         plain = analyze("<p>Join the Newcomer club</p>", "Newcomer")
         self.assertEqual(plain["objects"], [])
         self.assertIn("Newcomer club", plain["snippets"][0])
+
+    def test_visible_text(self):
+        from padel_bot.explore import visible_text
+        html = ("<html><head><style>.a{}</style><script>var x='hidden'</script></head><body>"
+                "<h1>Signup! Newcomer Club</h1><p>Sa., 31. Okt. &middot; 11:30</p><p>Level 0-3</p>"
+                "<p>Level 0-3</p><span>3/4</span></body></html>")
+        self.assertEqual(visible_text(html), ["Signup! Newcomer Club", "Sa., 31. Okt. · 11:30", "Level 0-3", "3/4"])

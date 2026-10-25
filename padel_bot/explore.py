@@ -1,9 +1,9 @@
 """One-off diagnosis: where does Playtomic serve event (tournament) data?
 
 Run once from your laptop with `py -m padel_bot explore-events <event link>`
-(or explore-events.bat). It reads the club page and the event page (two
-read-only requests), prints a short summary to screenshot, and writes details
-to explore_report.txt.
+(or explore-events.bat). It reads the event page and a few likely
+activity-list pages (about 6 read-only requests) and writes a short report,
+explore_report.txt, meant to be pasted into the chat.
 """
 
 from __future__ import annotations
@@ -97,28 +97,72 @@ def analyze(body: str, word: str) -> dict:
     return {"objects": objects, "snippets": snippets, "links": links, "apis": apis}
 
 
-def run(club: Club, event_url: str | None, user_agent: str, report_path: Path, word: str = "Newcomer") -> None:
-    pages = [("CLUB PAGE", club.url)] + ([("EVENT PAGE", event_url)] if event_url else [])
-    out = [f"Club: {club.name} ({club.tenant_id})"]
-    details = []
+_SKIP_BLOCKS = re.compile(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>")
+_TAG = re.compile(r"(?s)<[^>]+>")
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def visible_text(html: str, limit: int = 80) -> list[str]:
+    """The text a visitor would read on the page, in order, without repeats."""
+    import html as html_lib
+
+    text = _TAG.sub("\n", _SKIP_BLOCKS.sub(" ", html))
+    out: list[str] = []
+    for line in text.split("\n"):
+        line = re.sub(r"\s+", " ", html_lib.unescape(line)).strip()
+        if line and len(line) <= 140 and line not in out:
+            out.append(line)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _activity_links(html: str) -> list[str]:
+    return sorted({h for h in _HREF.findall(html) if re.search(r"/(activities|tournaments|classes)/", h)})
+
+
+def run(club: Club, event_url: str | None, user_agent: str, report_path: Path,
+        words: tuple[str, ...] = ("Newcomer", "Afterwork")) -> None:
+    """Fetch the event page and a few likely activity-list pages (read-only,
+    about 6 requests), and write a short report meant to be pasted to Claude."""
+    base = club.url.rstrip("/")
+    event_id = _UUID.search(event_url).group(0) if event_url and _UUID.search(event_url) else None
+    pages = []
+    if event_url:
+        pages.append(("event page", event_url))
+    pages += [
+        ("academy classes", f"{base}/academy/public-classes"),
+        ("club tournaments?", f"{base}/tournaments"),
+        ("club activities?", f"{base}/activities"),
+        ("academy tournaments?", f"{base}/academy/tournaments"),
+    ]
+    if event_id:
+        pages.append(("website event page?", re.sub(r"/clubs/.*$", f"/activities/tournaments/{event_id}", base)))
+
+    report = [f"Club: {club.name} ({club.tenant_id})"]
+    summary = list(report)
     for label, url in pages:
         status, ctype, body = fetch(url, user_agent)
-        out.append(f"\n{label} [{status}], {len(body)} chars")
-        details.append(f"===== {label}\n{url}\nstatus {status}, content-type {ctype}\n")
+        found = [w for w in words if w.lower() in body.lower()] if status == 200 else []
+        links = _activity_links(body) if status == 200 else []
+        line = f"[{status}] {label}: {len(body)} chars, activity links: {len(links)}"
+        line += f", mentions {'/'.join(found)}" if found else ""
+        summary.append(line)
+        report.append(f"\n===== {label} [{status}]\n{url}")
         if status != 200:
-            details.append(body[:1500])
             continue
-        found = analyze(body, word)
-        for obj in found["objects"]:
-            out.append(f"  object around '{word}', keys: {', '.join(sorted(obj))[:300]}")
-            out.append("    " + json.dumps(obj, ensure_ascii=False)[:350])
-        for snippet in found["snippets"]:
-            out.append(f"  text around '{word}': ...{snippet[:300]}...")
-        if not found["objects"] and not found["snippets"]:
-            out.append(f"  '{word}' not found")
-        out.append(f"  links: {' | '.join(found['links'])[:400] or '-'}")
-        out.append(f"  api addresses: {' | '.join(found['apis'])[:400] or '-'}")
-        details.append(json.dumps(found, indent=1, ensure_ascii=False)[:20000])
-    report_path.write_text("\n".join(details), encoding="utf-8")
-    print("\n".join(out))
-    print(f"\nDetails saved to {report_path.name}.")
+        report.append("TEXT: " + " | ".join(visible_text(body))[:1800])
+        if links:
+            report.append("LINKS: " + " | ".join(links[:12])[:900])
+            if label == "academy classes":  # also look at one class's own page
+                first = links[0] if links[0].startswith("http") else "https://playtomic.com" + links[0]
+                pages.append(("one class page", first))
+        if label == "event page":
+            data = analyze(body, words[0])
+            if data["apis"]:
+                report.append("APIS: " + " | ".join(data["apis"]))
+    text = "\n".join(report)
+    report_path.write_text(text, encoding="utf-8")
+    print("\n".join(summary))
+    print(f"\nReport saved to {report_path.name} ({len(text)} characters).")
+    print("Open it in Notepad, press Ctrl+A and Ctrl+C, and paste it into the chat with Claude.")
