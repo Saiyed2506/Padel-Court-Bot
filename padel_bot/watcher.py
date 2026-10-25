@@ -11,10 +11,10 @@ from typing import Callable
 from .booking import AutoBooker
 from .config import Settings
 from .notify import NotifyError, booking_link, build_messages
-from .playtomic import Court, PlaytomicClient, PlaytomicError
-from .rules import Slot, court_is_wanted, find_matches, parse_availability
+from .playtomic import Club, PlaytomicClient, PlaytomicError
+from .rules import Slot, find_matches, parse_availability
 from .state import SeenState
-from .timeutil import format_day, local_day_bounds_utc, minutes_of_day
+from .timeutil import format_day, minutes_of_day
 
 log = logging.getLogger("padel_bot")
 
@@ -39,13 +39,15 @@ def seconds_until_quiet_end(now: datetime, quiet: tuple[int, int]) -> float:
 
 
 class Watcher:
-    def __init__(self, settings: Settings, client: PlaytomicClient, notifier, state: SeenState,
-                 tz: tzinfo, booker: AutoBooker, *,
+    def __init__(self, settings: Settings, client: PlaytomicClient, club: Club, notifier,
+                 state: SeenState, tz: tzinfo, booker: AutoBooker, *,
                  clock: Callable[[], datetime] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  rng: random.Random | None = None):
         self.settings = settings
         self.client = client
+        self.club = club
+        self.courts = {c.resource_id: c for c in club.courts}
         self.notifier = notifier
         self.state = state
         self.tz = tz
@@ -53,21 +55,10 @@ class Watcher:
         self.clock = clock or (lambda: datetime.now(tz))
         self.sleep = sleep
         self.rng = rng or random.Random()
-        self.courts: dict[str, Court] = {}
         self.last_fetch: dict[date, datetime] = {}
         self.failed_rounds = 0
         self.failure_alert_sent = False
         self.backoff_s = 0.0
-
-    # --- setup ---------------------------------------------------------
-
-    def load_courts(self) -> list[Court]:
-        club = self.client.get_club(self.settings.tenant_id)
-        self.courts = {c.resource_id: c for c in club.courts}
-        wanted = [c for c in club.courts if court_is_wanted(c, self.settings)]
-        log.info("Club: %s - watching %d court(s): %s", club.name or self.settings.club_name,
-                 len(wanted), ", ".join(c.name for c in wanted) or "NONE")
-        return wanted
 
     # --- scheduling ----------------------------------------------------
 
@@ -90,8 +81,7 @@ class Watcher:
     # --- one round -----------------------------------------------------
 
     def fetch_matches(self, day: date, now: datetime) -> list[Slot]:
-        start_utc, end_utc = local_day_bounds_utc(day, self.tz)
-        raw = self.client.get_availability(self.settings.tenant_id, start_utc, end_utc)
+        raw = self.client.get_availability(self.club.tenant_id, day)
         slots = parse_availability(raw, self.courts, self.tz, self.settings.api_times_utc)
         return find_matches(slots, self.courts, self.settings, now, target_day=day)
 
@@ -132,7 +122,7 @@ class Watcher:
     def _announce(self, new_slots: list[Slot], new_by_day: dict[date, list[Slot]]) -> None:
         s = self.settings
         messages = build_messages(new_slots, s.club_name,
-                                  lambda d: booking_link(s.booking_url, s.tenant_id, d))
+                                  lambda d: booking_link(s.booking_url, self.club, d))
         try:
             for text in messages:
                 self.notifier.send(text)

@@ -37,9 +37,8 @@ class AutoBookSettings:
 
 @dataclass(frozen=True)
 class Settings:
-    tenant_id: str
+    club_url: str                 # https://playtomic.com/clubs/<name>
     club_name: str
-    api_base_url: str
     api_times_utc: bool
     booking_url: str
     indoor_only: bool
@@ -58,6 +57,7 @@ class Settings:
     only_preferred: bool
     alert_after_failed_rounds: int
     state_file: Path
+    club_file: Path               # cached club ID and courts
     auto_book: AutoBookSettings = field(default_factory=AutoBookSettings)
 
 
@@ -143,7 +143,7 @@ def _api_times_utc(value: str) -> bool:
     return value == "utc"
 
 
-def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings:
+def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
     if not config_path.exists():
         raise ConfigError(f"Config file not found: {config_path}")
     try:
@@ -157,11 +157,11 @@ def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings
     polling = data.get("polling", {})
     notify = data.get("notify", {})
 
-    tenant_id = str(club.get("tenant_id", "")).strip()
-    if require_tenant and not tenant_id:
+    club_url = str(club.get("url", "")).strip()
+    if require_club and not club_url:
         raise ConfigError(
-            "club.tenant_id is empty in config.toml. Run "
-            "`py -m padel_bot find-club` and paste the ID it prints."
+            "club.url is empty in config.toml. Double-click START-HERE.bat, or run "
+            "`py -m padel_bot set-club <link to the club on playtomic.com>`."
         )
 
     size = str(courts.get("size", "double")).lower()
@@ -187,11 +187,10 @@ def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings
     quiet_hours = (parse_hhmm(quiet[0]), parse_hhmm(quiet[1])) if quiet else None
 
     return Settings(
-        tenant_id=tenant_id,
+        club_url=club_url,
         club_name=str(club.get("name", "your club")),
-        api_base_url=str(club.get("api_base_url", "https://api.app.playtomic.io/v1")),
         api_times_utc=_api_times_utc(club.get("api_times", "utc")),
-        booking_url=str(club.get("booking_url", "")),
+        booking_url=str(club.get("booking_url", "") or "{club_url}?date={date}"),
         indoor_only=bool(courts.get("indoor_only", True)),
         court_size=size,
         exclude_courts=frozenset(str(n) for n in courts.get("exclude_names", [])),
@@ -208,5 +207,6 @@ def load_settings(config_path: Path, *, require_tenant: bool = True) -> Settings
         only_preferred=bool(notify.get("only_preferred", False)),
         alert_after_failed_rounds=int(notify.get("alert_after_failed_rounds", 6)),
         state_file=config_path.parent / str(data.get("state_file", "state.json")),
+        club_file=config_path.parent / "club.json",
         auto_book=_auto_book(data.get("auto_book", {})),
     )

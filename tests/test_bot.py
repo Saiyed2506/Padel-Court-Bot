@@ -12,7 +12,8 @@ from pathlib import Path
 from padel_bot.booking import AutoBooker
 from padel_bot.config import AutoBookSettings, ConfigError, load_dotenv, load_settings
 from padel_bot.notify import NotifyError, build_messages, format_slot
-from padel_bot.playtomic import Court, PlaytomicError, _parse_club
+from padel_bot.playtomic import (Club, Court, PlaytomicError, load_or_fetch_club,
+                                 normalize_club_url, parse_club_page, load_club)
 from padel_bot.rules import Slot, find_matches, parse_availability, parse_price
 from padel_bot.state import SeenState
 from padel_bot.timeutil import CentralEuropeanTime, local_day_bounds_utc
@@ -31,8 +32,11 @@ COURTS = {
 }
 
 
-def settings(tmp: Path, extra: str = "", tenant: str = "abc"):
-    text = (REPO / "config.toml").read_text(encoding="utf-8").replace('tenant_id = ""', f'tenant_id = "{tenant}"')
+CLUB = Club("T1", "padel amigos", "Halstenbek", tuple(COURTS.values()), "https://playtomic.com/clubs/padel-amigos")
+
+
+def settings(tmp: Path, extra: str = ""):
+    text = (REPO / "config.toml").read_text(encoding="utf-8").replace('url = ""', f'url = "{CLUB.url}"')
     path = tmp / "config.toml"
     path.write_text(text + extra, encoding="utf-8")
     return load_settings(path)
@@ -141,15 +145,15 @@ class RuleTests(unittest.TestCase):
 
 class ConfigTests(unittest.TestCase):
     def test_shipped_config_loads(self):
-        s = load_settings(REPO / "config.toml", require_tenant=False)
-        self.assertEqual(s.api_base_url, "https://api.app.playtomic.io/v1")
+        s = load_settings(REPO / "config.toml", require_club=False)
+        self.assertEqual(s.booking_url, "{club_url}?date={date}")
         self.assertTrue(s.api_times_utc)
         self.assertFalse(s.auto_book.enabled)
         self.assertTrue(s.auto_book.dry_run)
         self.assertEqual(s.days_ahead, 14)
 
-    def test_missing_tenant_is_explained(self):
-        with self.assertRaisesRegex(ConfigError, "find-club"):
+    def test_missing_club_is_explained(self):
+        with self.assertRaisesRegex(ConfigError, "START-HERE"):
             load_settings(REPO / "config.toml")
 
     def test_autobook_needs_max_price(self):
@@ -158,7 +162,7 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.toml"
             path.write_text(text, encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "max_price_eur"):
-                load_settings(path, require_tenant=False)
+                load_settings(path, require_club=False)
 
     def test_polling_floor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +170,7 @@ class ConfigTests(unittest.TestCase):
             path = Path(tmp) / "config.toml"
             path.write_text(text, encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "at least 2 minutes"):
-                load_settings(path, require_tenant=False)
+                load_settings(path, require_club=False)
 
     def test_dotenv(self):
         import os
@@ -225,8 +229,9 @@ class FakeClient:
         self.replies: dict[str, list[dict] | Exception] = {}
         self.calls: list[str] = []
 
-    def get_availability(self, tenant_id, start_utc, end_utc):
-        day = (start_utc + timedelta(hours=3)).date().isoformat()
+    def get_availability(self, tenant_id, day):
+        assert tenant_id == "T1"
+        day = day.isoformat()
         self.calls.append(day)
         reply = self.replies.get(day, [])
         if isinstance(reply, Exception):
@@ -252,10 +257,9 @@ class WatcherTests(unittest.TestCase):
         self.now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)  # Monday
         self.client = FakeClient()
         self.notifier = FakeNotifier()
-        self.watcher = Watcher(self.s, self.client, self.notifier, SeenState(self.s.state_file), TZ,
+        self.watcher = Watcher(self.s, self.client, CLUB, self.notifier, SeenState(self.s.state_file), TZ,
                                AutoBooker(self.s.auto_book, confirm=lambda s: False),
                                clock=lambda: self.now, sleep=lambda s: None)
-        self.watcher.courts = COURTS
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -278,9 +282,8 @@ class WatcherTests(unittest.TestCase):
     def test_state_survives_restart(self):
         self.client.replies["2026-10-27"] = [avail("c2", "2026-10-27", ("16:00:00", 90, "48 EUR"))]
         self.watcher.run_round()
-        again = Watcher(self.s, self.client, self.notifier, SeenState(self.s.state_file), TZ,
+        again = Watcher(self.s, self.client, CLUB, self.notifier, SeenState(self.s.state_file), TZ,
                         self.watcher.booker, clock=lambda: self.now, sleep=lambda s: None)
-        again.courts = COURTS
         self.assertEqual(again.run_round(), [])
 
     def test_failed_telegram_send_retries_next_round(self):
@@ -332,13 +335,51 @@ class WatcherTests(unittest.TestCase):
 
 
 class ParseClubTests(unittest.TestCase):
-    def test_parse_club(self):
-        club = _parse_club({"tenant_id": "t1", "tenant_name": "padel amigos",
-                            "address": {"street": "Str 1", "postal_code": "25469", "city": "Halstenbek"},
-                            "resources": [{"resource_id": "r1", "name": "Court 1",
-                                           "properties": {"resource_type": "indoor", "resource_size": "double"}}]})
-        self.assertEqual(club.courts[0], Court("r1", "Court 1", True, "double"))
+    PAGE = """<html><head></head><body><div id="__next"></div>
+<script id="__NEXT_DATA__" type="application/json">{"props": {"pageProps": {"tenant": {
+ "tenant_id": "t1", "tenant_name": "padel amigos Hamburg-Halstenbek", "slug": "padel-amigos",
+ "address": {"street": "Str 1", "postal_code": "25469", "city": "Halstenbek", "timezone": "Europe/Berlin"},
+ "resources": [
+  {"resourceId": "r1", "name": "Court 1", "features": ["indoor", "double", "panoramic"], "sport": "PADEL"},
+  {"resourceId": "r5", "name": "Court 5", "features": ["outdoor", "double"], "sport": "PADEL"},
+  {"resourceId": "r9", "name": "Single", "features": ["indoor", "single"], "sport": "PADEL"},
+  {"resourceId": "t1", "name": "Tennis 1", "features": ["outdoor"], "sport": "TENNIS"}]}}}}</script>
+</body></html>"""
+
+    def test_parse_club_page(self):
+        club = parse_club_page(self.PAGE, "https://playtomic.com/clubs/padel-amigos")
+        self.assertEqual(club.tenant_id, "t1")
         self.assertEqual(club.address, "Str 1, 25469, Halstenbek")
+        self.assertEqual(club.courts, (Court("r1", "Court 1", True, "double"),
+                                       Court("r5", "Court 5", False, "double"),
+                                       Court("r9", "Single", True, "single")))
+
+    def test_page_without_data(self):
+        with self.assertRaises(PlaytomicError):
+            parse_club_page("<html>blocked</html>", "https://playtomic.com/clubs/x")
+
+    def test_normalize_club_url(self):
+        self.assertEqual(normalize_club_url(" playtomic.com/clubs/padel-amigos?date=2026-10-27#top "),
+                         "https://playtomic.com/clubs/padel-amigos")
+        for bad in ("https://example.com/clubs/x", "https://playtomic.com/", "hello"):
+            with self.assertRaises(ValueError):
+                normalize_club_url(bad)
+
+    def test_club_is_cached(self):
+        class Client:
+            calls = 0
+            def get_club_page(self, url):
+                Client.calls += 1
+                return parse_club_page(ParseClubTests.PAGE, url)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "club.json"
+            url = "https://playtomic.com/clubs/padel-amigos"
+            first = load_or_fetch_club(Client(), url, cache)
+            second = load_or_fetch_club(Client(), url, cache)
+            self.assertEqual(first, second)
+            self.assertEqual(Client.calls, 1)
+            load_or_fetch_club(Client(), url + "-other", cache)  # different club: fetch again
+            self.assertEqual(Client.calls, 2)
 
 
 if __name__ == "__main__":
@@ -355,13 +396,13 @@ class SetupWizardTests(unittest.TestCase):
             self.assertEqual(env.read_text(encoding="utf-8"),
                              "# comment\nTELEGRAM_BOT_TOKEN=123:abc\nOTHER=1\nTELEGRAM_CHAT_ID=42\n")
 
-    def test_set_tenant_id(self):
-        from padel_bot.setup_wizard import set_tenant_id
+    def test_set_club_url(self):
+        from padel_bot.setup_wizard import set_club_url
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.toml"
             path.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
-            set_tenant_id(path, "abc-123")
-            self.assertEqual(load_settings(path).tenant_id, "abc-123")
+            set_club_url(path, "https://playtomic.com/clubs/abc")
+            self.assertEqual(load_settings(path).club_url, "https://playtomic.com/clubs/abc")
 
     def test_set_booking_url(self):
         from padel_bot.setup_wizard import set_booking_url
@@ -369,7 +410,7 @@ class SetupWizardTests(unittest.TestCase):
             path = Path(tmp) / "config.toml"
             path.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
             set_booking_url(path, "https://playtomic.com/clubs/padel-amigos?x=1&y=\\2")
-            self.assertEqual(load_settings(path, require_tenant=False).booking_url,
+            self.assertEqual(load_settings(path, require_club=False).booking_url,
                              "https://playtomic.com/clubs/padel-amigos?x=1&y=\\2")
 
     def test_full_wizard_flow(self):
@@ -388,10 +429,12 @@ class SetupWizardTests(unittest.TestCase):
                 return {"ok": True, "result": [{"message": {"chat": {"id": 42, "first_name": "Me"}}}]}
             return {"ok": True}
 
-        club = Club("T1", "padel amigos Hamburg-Halstenbek", "Halstenbek",
-                    tuple(c for c in COURTS.values()) + (Court("c3", "Court 3", True, "double"),
-                                                          Court("c4", "Court 4", True, "double")))
-        answers = iter(["not a token", token, "", "y", "y"])
+        def fake_page(self, url):
+            return Club("T1", "padel amigos Hamburg-Halstenbek", "Halstenbek",
+                        tuple(COURTS.values()) + (Court("c3", "Court 3", True, "double"),
+                                                  Court("c4", "Court 4", True, "double")), url)
+        answers = iter(["not a token", token, "", "https://example.com/x",
+                        "https://playtomic.com/clubs/padel-amigos?date=2026-10-25", "y", "y"])
         checked = []
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
@@ -399,16 +442,18 @@ class SetupWizardTests(unittest.TestCase):
             with mock.patch("builtins.input", lambda prompt="": next(answers)), \
                  mock.patch("builtins.print"), \
                  mock.patch.object(setup_wizard.TelegramNotifier, "_call", fake_call), \
-                 mock.patch.object(setup_wizard.PlaytomicClient, "find_clubs", lambda self, *a: [club]), \
+                 mock.patch.object(setup_wizard.PlaytomicClient, "get_club_page", fake_page), \
                  mock.patch.dict("os.environ", {}, clear=False):
                 self.assertEqual(setup_wizard.run_setup(config, lambda days: checked.append(days)), 0)
             env = (Path(tmp) / ".env").read_text(encoding="utf-8")
             self.assertIn(f"TELEGRAM_BOT_TOKEN={token}", env)
             self.assertIn("TELEGRAM_CHAT_ID=42", env)
-            self.assertEqual(load_settings(config).tenant_id, "T1")
+            self.assertEqual(load_settings(config).club_url, "https://playtomic.com/clubs/padel-amigos")
+            self.assertEqual(load_club(Path(tmp) / "club.json").tenant_id, "T1")
         self.assertEqual(checked, [1])
         sent = [p for m, p in telegram_calls if m == "sendMessage"]
         self.assertEqual(sent[0]["chat_id"], "42")
+        self.assertIn("https://playtomic.com/clubs/padel-amigos?date=", sent[0]["text"])
 
     def test_rerun_keeps_working_telegram(self):
         from unittest import mock

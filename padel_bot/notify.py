@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 from datetime import date
 
+from .playtomic import Club
 from .rules import Slot
 from .timeutil import format_day, format_time
 
@@ -18,8 +19,8 @@ class NotifyError(Exception):
     pass
 
 
-def booking_link(template: str, tenant_id: str, day: date) -> str:
-    return template.format(tenant_id=tenant_id, date=day.isoformat())
+def booking_link(template: str, club: Club, day: date) -> str:
+    return template.format(club_url=club.url, tenant_id=club.tenant_id, date=day.isoformat())
 
 
 def format_price(slot: Slot) -> str:

@@ -28,8 +28,10 @@ never needs your Playtomic password.
 ## Before you start: risks, in plain words
 
 - **No official API.** Playtomic only offers an official API to clubs. This bot
-  uses the same undocumented endpoints the Playtomic app uses. They can change
-  or be blocked at any time. If checks keep failing, the bot sends you a ⚠️
+  reads the same public data the playtomic.com website shows to visitors who
+  aren't logged in: the club page and its availability endpoint. (The app's
+  API now needs a login; the old one is gone.) These can change or be blocked
+  at any time. If checks keep failing, the bot sends you a ⚠️
   Telegram message so you don't think there are simply no free courts.
 - **Terms of service: not fully clear.** An older Playtomic terms document
   (for club customers) bans "any type of robotic tool". I couldn't verify the
@@ -123,14 +125,18 @@ the club in Playtomic, see "Booking link" below.
 
 `.env` is listed in `.gitignore`, so git never uploads it.
 
-### 5. Find the club ID
+### 5. Tell the bot which club
+
+Find the club on playtomic.com in your browser (for example, Google
+`playtomic padel amigos halstenbek`) and copy the address from the address bar.
+It looks like `https://playtomic.com/clubs/<some-name>`. Then:
 
 ```powershell
-py -m padel_bot find-club
+py -m padel_bot set-club https://playtomic.com/clubs/<some-name>
 ```
-It prints the club, its `tenant_id` and all courts, marking the ones that will
-be watched (`<- watched`). There should be **4 indoor doubles courts**. Copy the
-`tenant_id = "..."` line into the `[club]` section of `config.toml`.
+It saves the link in `config.toml`, stores the club ID and courts in
+`club.json`, and lists all padel courts, marking the watched ones
+(`<- watched`). There should be **4 indoor doubles courts**.
 
 ### 6. Check that times are correct (important, once)
 
@@ -188,9 +194,9 @@ opens the 14th day for booking. If it's at midnight and slots get taken
 before 07:00, shorten `quiet_hours` (e.g. `["01:00", "07:00"]`) or set it to `[]`.
 
 **Booking link.** Playtomic has no documented link to one exact slot. The
-default link tries to open the club. If it doesn't work on your phone, open the
-club on playtomic.com in a browser, copy that URL and put it in `booking_url`.
-You can use `{date}` in it if the website supports a date.
+default link opens the club page on the slot's day
+(`{club_url}?date={date}`). If you prefer the app's share link, put it in
+`booking_url`.
 
 ---
 
@@ -238,4 +244,3 @@ tests/          offline tests: py -m unittest -v
 | `TELEGRAM_BOT_TOKEN is not set` | `.env` missing, misnamed (`.env.txt`?) or not in this folder |
 | `Telegram ... chat not found` | Press Start in your bot chat, recheck `TELEGRAM_CHAT_ID` |
 | `Playtomic problem: HTTP 403/404` | Playtomic changed or blocked the endpoint. Tell me. |
-| `No club matching 'amigos'` | It prints nearby clubs; use `--search` with part of the real name |

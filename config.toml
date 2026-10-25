@@ -2,15 +2,12 @@
 
 [club]
 name = "Padel Amigos Hamburg-Halstenbek"
-# Fill in after running:  py -m padel_bot find-club
-tenant_id = ""
-# Link put in every alert. {tenant_id} and {date} (YYYY-MM-DD) are filled in.
-# Playtomic has no documented link to one exact slot. Test this with
-# `py -m padel_bot test-notify`; if it doesn't open your club, replace it with
-# the club's URL copied from your browser on playtomic.com.
-booking_url = "https://app.playtomic.io/tenant/{tenant_id}"
-# Playtomic's (unofficial) API address. It moved in 2026; change only if told to.
-api_base_url = "https://api.app.playtomic.io/v1"
+# The club's page on playtomic.com, e.g. https://playtomic.com/clubs/<club-name>.
+# Filled in by START-HERE.bat (or: py -m padel_bot set-club <link>).
+url = ""
+# Link put in every alert. {club_url}, {tenant_id} and {date} (YYYY-MM-DD) are
+# filled in. Default: the club page opened on the slot's day.
+booking_url = "{club_url}?date={date}"
 # Are the API's slot times in "utc" or "local" (Hamburg) time? Sources disagree.
 # If `check --all` shows times 1-2 hours off from the app, switch this.
 api_times = "utc"
