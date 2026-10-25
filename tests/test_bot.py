@@ -390,3 +390,12 @@ class SetupWizardTests(unittest.TestCase):
         self.assertEqual(checked, [1])
         sent = [p for m, p in telegram_calls if m == "sendMessage"]
         self.assertEqual(sent[0]["chat_id"], "42")
+
+    def test_rerun_keeps_working_telegram(self):
+        from unittest import mock
+        from padel_bot import setup_wizard
+        with mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "1:x", "TELEGRAM_CHAT_ID": "42"}), \
+             mock.patch.object(setup_wizard.TelegramNotifier, "bot_username", lambda self: "b"), \
+             mock.patch("builtins.input", lambda prompt="": ""), mock.patch("builtins.print"):
+            notifier = setup_wizard.setup_telegram(Path("unused.env"))
+        self.assertEqual(notifier.chat_id, "42")

@@ -54,7 +54,25 @@ def _step(number: int, title: str) -> None:
     print(f"\n{'=' * 60}\nSTEP {number}: {title}\n{'=' * 60}")
 
 
+def existing_telegram() -> TelegramNotifier | None:
+    """The Telegram setup from .env, if it's complete and the token still works."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return None
+    notifier = TelegramNotifier(token, chat_id)
+    try:
+        username = notifier.bot_username()
+    except NotifyError:
+        return None  # e.g. the token was revoked: set it up again
+    keep = _ask(f"Telegram is already set up (@{username}). Keep it? (Y/n): ").lower()
+    return None if keep.startswith("n") else notifier
+
+
 def setup_telegram(env_path: Path) -> TelegramNotifier:
+    existing = existing_telegram()
+    if existing:
+        return existing
     _step(1, "Create your Telegram bot (about 2 minutes)")
     print("""On your phone or PC, in Telegram:
   1. Tap the search bar, type  BotFather  and open the one with the blue tick.
@@ -129,7 +147,12 @@ def run_setup(config_path: Path, run_check) -> int:
     try:
         setup_club(config_path)
     except PlaytomicError as exc:
-        print(f"\nCouldn't reach Playtomic: {exc}\nCheck your internet and run setup again.")
+        print(f"\nCouldn't reach Playtomic: {exc}")
+        if "getaddrinfo" in str(exc) or "11001" in str(exc):
+            print("Your laptop could not find the address api.playtomic.io. Telegram worked, so\n"
+                  "your internet is fine; a company network, VPN, or security/ad-blocking\n"
+                  "software may be blocking it. Send a screenshot of this to Claude.")
+        print("Your Telegram setup is saved; running setup again skips it.")
         return 1
 
     settings = load_settings(config_path)
