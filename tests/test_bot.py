@@ -657,3 +657,224 @@ class ExploreTests(unittest.TestCase):
                 "<h1>Signup! Newcomer Club</h1><p>Sa., 31. Okt. &middot; 11:30</p><p>Level 0-3</p>"
                 "<p>Level 0-3</p><span>3/4</span></body></html>")
         self.assertEqual(visible_text(html), ["Signup! Newcomer Club", "Sa., 31. Okt. · 11:30", "Level 0-3", "3/4"])
+
+
+CLASS_PAGE_LINES = ("Leveling Session | padel amigos Hamburg-Halstenbek | Für Spieler | Clubs | / | padel amigos Hamburg-Halstenbek | "
+    "Leveling Session | Padel | Gruppenstunde | Datum | Freitag, 30. Oktober | 17:30h | Dauer | 60 Min. | Niveau | 0 – 7 | "
+    "Anmeldung endet | Donnerstag, 29. Oktober | 17:30h | Beschreibung | Remember that also your reliability index will be updated. | "
+    "Trainer | DA | Dado | Spieler (1/3) | SK | S | Verfügbar | 1 | 3 | Wo gespielt wird | Am Bahndamm 88, 25469, Halstenbek | "
+    "30 € | / Anmeldung | Freitag, 30. Oktober | 17:30 | · | 1/3 Plätze · 2 übrig | Gruppenstunde buchen · 30 € | 2 Plätze übrig | Buchen")
+OPEN_PLAY_LINES = ("Playtomic | Continue in the app | Everything you need is in the Playtomic app | Open Play | "
+    "Sat, Oct 31 · 11:30 AM | Newcomer Club mit Coach David | Padel | 0 – 3 | Unrestricted | 0 of 10 spots | "
+    "Registration | EUR | €17.00 | Get the app to register")
+
+
+def as_html(lines: str) -> str:
+    return "<html><body>" + "".join(f"<p>{line}</p>" for line in lines.split(" | ")) + "<script>x=1</script></body></html>"
+
+
+class EventParsingTests(unittest.TestCase):
+    today = date(2026, 10, 25)
+
+    def test_class_page(self):
+        from padel_bot.events import parse_class_page
+        url = "https://playtomic.com/de/activities/public-classes/1f63e06a-ced1-4551-9d5e-400caf2342ef"
+        e = parse_class_page(as_html(CLASS_PAGE_LINES), url, TZ, self.today)
+        self.assertEqual(e.event_id, "1f63e06a-ced1-4551-9d5e-400caf2342ef")
+        self.assertEqual((e.name, e.kind, e.coach, e.level, e.price), ("Leveling Session", "Group class", "Dado", "0 – 7", "€30"))
+        self.assertEqual(e.start, datetime(2026, 10, 30, 17, 30, tzinfo=TZ))
+        self.assertEqual((e.duration, e.registered, e.capacity, e.spots_left), (60, 1, 3, 2))
+
+    def test_open_play_page(self):
+        from padel_bot.events import describe_event, parse_open_play_page
+        url = "https://app.playtomic.com/tournaments/30edfbd8-8f5f-4b74-8075-500e4caa7c78"
+        e = parse_open_play_page(as_html(OPEN_PLAY_LINES), url, TZ, self.today)
+        self.assertEqual((e.kind, e.name, e.coach, e.level, e.price), ("Open Play", "Newcomer Club mit Coach David", "David", "0 – 3", "€17"))
+        self.assertEqual(e.start, datetime(2026, 10, 31, 11, 30, tzinfo=TZ))
+        self.assertEqual((e.registered, e.capacity, e.spots_left), (0, 10, 10))
+        self.assertEqual(describe_event(e).splitlines()[0],
+                         "Sat 31 Oct 11:30 · Newcomer Club mit Coach David · level 0 – 3 · €17 · 10 spots left (of 10)")
+
+    def test_year_rollover(self):
+        from padel_bot.events import parse_day_month
+        self.assertEqual(parse_day_month("Dienstag, 05. Januar", date(2026, 12, 20)), date(2027, 1, 5))
+        self.assertEqual(parse_day_month("Tue, Dec 15", self.today), date(2026, 12, 15))
+
+    def test_tournament_from_api(self):
+        from padel_bot.events import tournament_event
+        e = tournament_event({"tournament_id": "t9", "name": "Afterwork intermediate", "start_date": "2026-12-03T18:00:00",
+                              "available_places": 0, "type": "OPEN_PLAY"}, TZ, True)
+        self.assertEqual((e.event_id, e.kind, e.spots_left), ("t9", "Open Play", 0))
+        self.assertEqual(e.start, datetime(2026, 12, 3, 19, 0, tzinfo=TZ))  # UTC -> CET
+        self.assertIn("t9", e.url)
+
+
+class FakeWeb:
+    def __init__(self):
+        self.pages: dict[str, str] = {}
+        self.fetched: list[str] = []
+
+    def fetch_page(self, url):
+        self.fetched.append(url)
+        for key, html in self.pages.items():
+            if key in url:
+                if isinstance(html, Exception):
+                    raise html
+                return html
+        raise PlaytomicError("HTTP 404", status=404)
+
+
+class FakeAccount:
+    logged_in = True
+
+    def __init__(self):
+        self.events: list[dict] | Exception = []
+
+    def list_tournaments(self, tenant_id, from_utc):
+        if isinstance(self.events, Exception):
+            raise self.events
+        return self.events
+
+
+def open_play_html(name, when, registered, capacity):
+    return as_html(f"Open Play | {when} | {name} | Padel | 2 – 4 | {registered} of {capacity} spots | €17.00")
+
+
+class EventWatcherTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.events import EventWatcher, EventWords
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.s = settings(tmp)
+        self.now = datetime(2026, 10, 25, 12, 0, tzinfo=TZ)  # Sunday
+        self.web, self.account, self.telegram = FakeWeb(), FakeAccount(), FakeNotifier()
+        self.web.pages["academy/public-classes"] = '<a href="/de/activities/public-classes/1f63e06a-ced1-4551-9d5e-400caf2342ef">x</a>'
+        self.web.pages["1f63e06a"] = as_html(CLASS_PAGE_LINES)
+        self.words = EventWords(tmp / "event_words.json", ["Newcomer", "Afterwork"])
+        self.make = lambda: EventWatcher(self.s, self.web, self.account, CLUB, TZ, tmp / "events_state.json",
+                                         self.words, self.telegram, clock=lambda: self.now, sleep=lambda s: None)
+        self.ew = self.make()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_event(self, eid, name, start_utc, places, page_when, registered, capacity):
+        self.account.events = (self.account.events if isinstance(self.account.events, list) else []) + [
+            {"tournament_id": eid, "name": name, "start_date": start_utc, "available_places": places}]
+        self.web.pages[eid] = open_play_html(name, page_when, registered, capacity)
+
+    def test_first_check_lists_then_new_and_freed_alerts(self):
+        self.add_event("e1", "Newcomer Club mit Coach David", "2026-11-07T10:30:00", 0, "Sat, Nov 7 · 11:30 AM", 10, 10)
+        sent = self.ew.check()
+        self.assertEqual(len(sent), 1)
+        self.assertIn("Now watching", sent[0])
+        self.assertIn("Newcomer Club mit Coach David · level 2 – 4 · €17 · FULL", sent[0])
+        self.assertNotIn("Leveling", sent[0])            # class not watched by name
+        # December dates get published:
+        self.now += timedelta(minutes=30)
+        self.add_event("e2", "Afterwork intermediate", "2026-12-03T17:00:00", 3, "Thu, Dec 3 · 6:00 PM", 1, 4)
+        sent = self.ew.check()
+        self.assertEqual(sent, ["🆕 New date: Thu 3 Dec 18:00 · Afterwork intermediate · level 2 – 4 · €17 · 3 spots left (of 4)\n"
+                                "https://app.playtomic.com/tournaments/e2"])
+        # Someone cancels in the full November event:
+        self.now += timedelta(minutes=30)
+        self.account.events[0]["available_places"] = 1
+        fetched_before = len(self.web.fetched)
+        sent = self.ew.check()
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith("🟢 Spot free again: Sat 7 Nov 11:30 · Newcomer"))
+        self.assertIn("1 spot left", sent[0])
+        # known event pages aren't re-read; only the class list was fetched
+        self.assertEqual([u for u in self.web.fetched[fetched_before:] if "tournaments" in u], [])
+        self.assertEqual(self.ew.check(), [])            # nothing changed: silence
+
+    def test_state_survives_restart(self):
+        self.add_event("e1", "Newcomer Club mit Coach David", "2026-11-07T10:30:00", 0, "Sat, Nov 7 · 11:30 AM", 10, 10)
+        self.ew.check()
+        self.assertEqual(self.make().check(), [])
+
+    def test_failed_source_does_not_cause_fake_new_alerts(self):
+        self.add_event("e1", "Newcomer Club mit Coach David", "2026-11-07T10:30:00", 2, "Sat, Nov 7 · 11:30 AM", 8, 10)
+        self.ew.check()
+        saved = self.account.events
+        self.account.events = PlaytomicError("HTTP 503", status=503)
+        self.assertEqual(self.ew.check(), [])
+        self.assertEqual(len(self.ew.upcoming), 1)       # still shown from memory
+        self.account.events = saved
+        self.assertEqual(self.ew.check(), [])            # back: not "new"
+
+    def test_not_logged_in_warns_once_and_classes_still_work(self):
+        from padel_bot.account import AuthError
+        self.words.save(["Leveling"])
+        self.account.events = AuthError("Not logged in to Playtomic - double-click playtomic-login.bat.")
+        self.ew.check()
+        self.now += timedelta(minutes=30)
+        self.ew.check()
+        warnings = [m for m in self.telegram.sent if "playtomic-login.bat" in m]
+        self.assertEqual(len(warnings), 1)
+        self.assertTrue(any("Leveling Session · coach Dado · level 0 – 7 · €30 · 2 spots left (of 3)" in m
+                            for m in self.telegram.sent))
+
+    def test_weekly_overview_sunday_evening_once(self):
+        self.add_event("e1", "Newcomer Club mit Coach David", "2026-11-07T10:30:00", 0, "Sat, Nov 7 · 11:30 AM", 10, 10)
+        self.ew.tick()                                    # Sunday 12:00: check, no overview yet
+        self.assertFalse(any("Upcoming events" in m for m in self.telegram.sent))
+        self.now = datetime(2026, 10, 25, 18, 5, tzinfo=TZ)
+        self.ew.tick()
+        self.ew.tick()
+        overviews = [m for m in self.telegram.sent if m.startswith("📅 Upcoming events")]
+        self.assertEqual(len(overviews), 1)
+        self.assertIn("1 date(s), 0 with free spots", overviews[0])
+
+    def test_watch_commands(self):
+        from padel_bot.commands import CommandCenter
+        from padel_bot.wishes import WishStore
+        watcher = Watcher(self.s, FakeClient(), CLUB, self.telegram, SeenState(self.s.state_file), TZ,
+                          AutoBooker(self.s.auto_book, confirm=lambda s: False), clock=lambda: self.now, sleep=lambda s: None)
+        watcher.events = self.ew
+        cc = CommandCenter(watcher, self.telegram, WishStore(Path(self.tmp.name) / "w.json", self.s.windows))
+        self.assertIn("still to come", cc.handle("/events"))
+        self.assertIn("Watching events named 'Leveling'", cc.handle("/watch Leveling"))
+        self.assertEqual(self.words.load(), ["Newcomer", "Afterwork", "Leveling"])
+        self.ew.check()
+        self.assertIn("Leveling Session", cc.handle("/events"))
+        self.assertIn("Stopped watching 'Afterwork'", cc.handle("/unwatch 2"))
+        self.assertIn("Which one?", cc.handle("/unwatch 7"))
+
+
+class AccountTests(unittest.TestCase):
+    def test_login_refresh_and_retry(self):
+        from padel_bot.account import AuthError, PlaytomicAccount
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = PlaytomicAccount(Path(tmp) / "playtomic_token.json", "ua")
+            calls = []
+            def fake(method, path, *, query=None, body=None, bearer=None):
+                calls.append((method, path, bearer, body))
+                if path == "/v3/auth/login":
+                    return {"access_token": "A1", "refresh_token": "R1", "access_token_expiration": "2099-01-01T00:00:00"}
+                if path == "/v3/auth/token":
+                    assert body["refresh_token"] == "R1"
+                    return {"access_token": "A2", "refresh_token": "R2", "access_token_expiration": "2099-01-01T00:00:00"}
+                if bearer == "A1":
+                    raise PlaytomicError("HTTP 401", status=401)
+                return [{"tournament_id": "x"}]
+            acc._request = fake
+            with self.assertRaises(AuthError):
+                acc.get("/v2/tournaments")                # not logged in yet
+            acc.login("me@example.com", "secret")
+            saved = (Path(tmp) / "playtomic_token.json").read_text()
+            self.assertNotIn("secret", saved)
+            self.assertNotIn("me@example.com", saved)
+            self.assertEqual(acc.list_tournaments("T1", datetime(2026, 10, 25, tzinfo=timezone.utc)), [{"tournament_id": "x"}])
+            self.assertEqual([c[1] for c in calls], ["/v3/auth/login", "/v2/tournaments", "/v3/auth/token", "/v2/tournaments"])
+            self.assertEqual(PlaytomicAccount(Path(tmp) / "playtomic_token.json", "ua").token["access_token"], "A2")
+
+    def test_wrong_password_message(self):
+        from padel_bot.account import AuthError, PlaytomicAccount
+        with tempfile.TemporaryDirectory() as tmp:
+            acc = PlaytomicAccount(Path(tmp) / "t.json", "ua")
+            def fake(*a, **k):
+                raise PlaytomicError("HTTP 401", status=401)
+            acc._request = fake
+            with self.assertRaisesRegex(AuthError, "Google or Apple"):
+                acc.login("me@example.com", "wrong")

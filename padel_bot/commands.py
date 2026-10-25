@@ -29,7 +29,12 @@ HELP = """🎾 Padel bot commands
 /reset - back to the wishes in config.toml
 /now - free slots matching your wishes right now
 /status - is the bot running, last check
-/pause - stop alerts   /resume - start again"""
+/pause - stop alerts   /resume - start again
+
+Events (classes, Open Play):
+/events - upcoming dates of watched events
+/watch <name> - watch events with this in their name
+/unwatch <number> - stop watching (see /events)"""
 
 # Shown in Telegram's "/" menu.
 MENU = [
@@ -38,6 +43,9 @@ MENU = [
     ("remove", "Delete a wish: /remove 2"),
     ("now", "Free slots right now"),
     ("status", "Is the bot running?"),
+    ("events", "Upcoming watched events"),
+    ("watch", "Watch an event name: /watch Afterwork"),
+    ("unwatch", "Stop watching an event name"),
     ("pause", "Stop alerts"),
     ("resume", "Start alerts again"),
     ("help", "All commands"),
@@ -113,7 +121,39 @@ class CommandCenter:
             return self.watcher.status_text()
         if command == "/now":
             return self._now_text()
+        if command in ("/events", "/watch", "/unwatch"):
+            return self._events_command(command, args.strip())
         return "I only understand commands. Send /help to see them."
+
+    def _events_command(self, command: str, args: str) -> str:
+        events = self.watcher.events
+        if events is None:
+            return "Event watching is off (config.toml: [events] enabled = false)."
+        words = events.words.load()
+        if command == "/watch":
+            if not args:
+                return "Which name? e.g. /watch Afterwork"
+            if any(w.lower() == args.lower() for w in words):
+                return f"Already watching '{args}'."
+            events.words.save(words + [args])
+            events.restart_watching()
+            self.watcher.request_check()
+            return f"👀 Watching events named '{args}'. I'll list the dates in a moment."
+        if command == "/unwatch":
+            if not args.isdigit() or not 1 <= int(args) <= len(words):
+                listed = "\n".join(f"{i}. {w}" for i, w in enumerate(words, 1)) or "(none)"
+                return f"Which one? e.g. /unwatch 1\n\nWatched names:\n{listed}"
+            removed = words.pop(int(args) - 1)
+            events.words.save(words)
+            events.restart_watching()
+            self.watcher.request_check()
+            return f"🗑 Stopped watching '{removed}'."
+        listed = "\n".join(f"{i}. {w}" for i, w in enumerate(words, 1)) or "(none - add with /watch <name>)"
+        if events.last_check is None:
+            return f"Watched names:\n{listed}\n\nFirst check is still to come - try again in a minute."
+        problem = f"\n\n⚠️ {events.open_play_problem}" if events.open_play_problem else ""
+        return (events.overview_text() + f"\n\nWatched names:\n{listed}\n"
+                f"Last checked {events.last_check.strftime('%a %H:%M')}" + problem)
 
     def _now_text(self) -> str:
         w = self.watcher

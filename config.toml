@@ -59,3 +59,14 @@ telegram_commands = true      # change wishes from Telegram: send /help to the b
 enabled = false
 dry_run = true
 max_price_eur = 0             # must be > 0 before enabled can be true
+
+[events]
+# Club events, matched by name: group classes (public) and Open Play events
+# (these need your Playtomic login: double-click playtomic-login.bat).
+# Change the names from Telegram with /watch and /unwatch.
+enabled = true
+watch = ["Newcomer", "Afterwork"]
+check_every_minutes = 30      # new dates appear at random times; minimum 15
+days_ahead = 120              # how far ahead to look for published dates
+weekly_overview = "sun 18:00" # or "off"
+api_times = "utc"

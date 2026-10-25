@@ -68,6 +68,7 @@ class Watcher:
         self.rounds = 0
         self.matches_by_day: dict[date, list[Slot]] = {}
         self.commands = None  # a CommandCenter, when Telegram commands are on
+        self.events = None    # an EventWatcher, when event watching is on
 
     # --- controls used by Telegram commands ----------------------------
 
@@ -225,7 +226,7 @@ class Watcher:
     def run_forever(self) -> None:
         while True:
             now = self.clock()
-            if self.paused or not self.settings.windows:
+            if self.paused:
                 self.check_requested = False
                 self.wait(300)  # nothing to check; still answer commands
                 continue
@@ -235,11 +236,19 @@ class Watcher:
                 self.check_requested = False
                 self.wait(min(wait + self.rng.uniform(0, 120), 1800))  # re-evaluate at least every 30 min
                 continue
-            try:
-                self.run_round()
-            except Exception:  # keep running; one bad reply shouldn't stop the watcher
-                log.exception("Unexpected error in this round")
-                self.backoff_s = min(max(self.backoff_s * 2, self.settings.near_interval_s), MAX_BACKOFF_S)
+            if self.settings.windows:
+                try:
+                    self.run_round()
+                except Exception:  # keep running; one bad reply shouldn't stop the watcher
+                    log.exception("Unexpected error in this round")
+                    self.backoff_s = min(max(self.backoff_s * 2, self.settings.near_interval_s), MAX_BACKOFF_S)
+            else:
+                self.check_requested = False
+            if self.events is not None:
+                try:
+                    self.events.tick()
+                except Exception:
+                    log.exception("Unexpected error while checking events")
             wait = self.next_sleep_s()
             log.info("Next check in %.1f minutes", wait / 60)
             self.wait(wait)

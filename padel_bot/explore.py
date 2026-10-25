@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from .playtomic import Club, _enclosing_objects, _page_texts
+from .playtomic import Club, _enclosing_objects, _page_texts, page_lines
 
 _EVENT_KEY = re.compile(r'"(?:tournament_id|tournamentId)"\s*:')
 
@@ -97,24 +97,12 @@ def analyze(body: str, word: str) -> dict:
     return {"objects": objects, "snippets": snippets, "links": links, "apis": apis}
 
 
-_SKIP_BLOCKS = re.compile(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>")
-_TAG = re.compile(r"(?s)<[^>]+>")
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def visible_text(html: str, limit: int = 80) -> list[str]:
     """The text a visitor would read on the page, in order, without repeats."""
-    import html as html_lib
-
-    text = _TAG.sub("\n", _SKIP_BLOCKS.sub(" ", html))
-    out: list[str] = []
-    for line in text.split("\n"):
-        line = re.sub(r"\s+", " ", html_lib.unescape(line)).strip()
-        if line and len(line) <= 140 and line not in out:
-            out.append(line)
-        if len(out) >= limit:
-            break
-    return out
+    return [line for line in page_lines(html, limit=2000, dedupe=True) if len(line) <= 140][:limit]
 
 
 def _activity_links(html: str) -> list[str]:

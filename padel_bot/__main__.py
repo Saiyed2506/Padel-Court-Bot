@@ -8,7 +8,7 @@ import logging
 import random
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .booking import AutoBooker
@@ -18,7 +18,9 @@ from .playtomic import Club, PlaytomicClient, PlaytomicError, load_or_fetch_club
 from .rules import court_is_wanted, find_matches, parse_availability
 from .state import SeenState
 from .timeutil import club_timezone, format_day, format_time
+from .account import PlaytomicAccount
 from .commands import CommandCenter
+from .events import EventWatcher, EventWords
 from .watcher import Watcher
 from .wishes import WishStore
 
@@ -127,6 +129,42 @@ def cmd_setup(args, settings: Settings) -> int:
     return run_setup(args.config, run_check)
 
 
+def account_for(settings: Settings) -> PlaytomicAccount:
+    return PlaytomicAccount(settings.state_file.parent / "playtomic_token.json", settings.user_agent)
+
+
+def cmd_login(args, settings: Settings) -> int:
+    import getpass
+
+    print("Log in to Playtomic so the bot can read the club's Open Play events.\n"
+          "Your password is sent to Playtomic once and is NOT saved; the bot keeps only\n"
+          "the login token Playtomic gives back (playtomic_token.json - keep it private).\n"
+          "The bot only READS the event list. It never books or pays.\n")
+    email = input("Playtomic email: ").strip()
+    password = getpass.getpass("Playtomic password (nothing shows while you type - that's normal; Enter when done): ")
+    account = account_for(settings)
+    account.login(email, password)
+    del password
+    print("\n✅ Logged in. Password not saved.\n")
+
+    club = get_club(settings)
+    raws = account.list_tournaments(club.tenant_id, datetime.now(timezone.utc))
+    print(f"{club.name} has {len(raws)} upcoming event(s) in the app:")
+    for raw in raws[:20]:
+        print(f"   {str(raw.get('start_date'))[:16]}  {str(raw.get('name'))[:45]:<45}  places left: {raw.get('available_places')}")
+    if raws:
+        print(f"\n(fields: {', '.join(sorted(raws[0]))[:300]})")
+    print("\nThe times above are as Playtomic sends them (probably UTC: 10:30 here = 11:30 in Hamburg in winter).")
+    print("Start run-bot.bat (again) to begin watching events.")
+    return 0
+
+
+def cmd_logout(args, settings: Settings) -> int:
+    account_for(settings).logout()
+    print("Logged out: the Playtomic login token was deleted. Open Play events are no longer read.")
+    return 0
+
+
 def cmd_explore_events(args, settings: Settings) -> int:
     from .explore import run
 
@@ -151,6 +189,10 @@ def cmd_run(args, settings: Settings) -> int:
     settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
                       SeenState(settings.state_file), tz, booker)
+    if settings.events_enabled:
+        words = EventWords(settings.state_file.parent / "event_words.json", list(settings.event_words))
+        watcher.events = EventWatcher(settings, PlaytomicClient(settings.user_agent), account_for(settings),
+                                      club, tz, settings.state_file.parent / "events_state.json", words, notifier)
     if settings.telegram_commands:
         watcher.commands = CommandCenter(watcher, notifier, store)
         watcher.commands.register_menu()
@@ -192,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("telegram-chat-id", help="show your Telegram chat ID (setup helper)")
     p.set_defaults(func=cmd_telegram_chat_id, needs_club=False)
+
+    p = sub.add_parser("login", help="log in to Playtomic (for Open Play events; password not saved)")
+    p.set_defaults(func=cmd_login, needs_club=True)
+
+    p = sub.add_parser("logout", help="forget the Playtomic login")
+    p.set_defaults(func=cmd_logout, needs_club=False)
 
     p = sub.add_parser("explore-events", help="one-off: find where Playtomic serves event data")
     p.add_argument("event_url", nargs="?", help="a shared event link (optional)")

@@ -56,6 +56,13 @@ class Settings:
     user_agent: str
     only_preferred: bool
     telegram_commands: bool
+    events_enabled: bool
+    event_words: tuple[str, ...]
+    events_interval_s: int
+    events_days_ahead: int
+    events_times_utc: bool
+    overview_weekday: int | None     # 0 = Monday; None = no weekly overview
+    overview_min: int
     alert_after_failed_rounds: int
     state_file: Path
     club_file: Path               # cached club ID and courts
@@ -188,6 +195,21 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         # Deliberate floor: polling faster than this is how bots get blocked.
         raise ConfigError("polling intervals must be at least 2 minutes")
 
+    events = data.get("events", {})
+    events_minutes = float(events.get("check_every_minutes", 30))
+    if events_minutes < 15:
+        raise ConfigError("events.check_every_minutes must be at least 15")
+    events_interval_s = int(events_minutes * 60)
+    overview = str(events.get("weekly_overview", "sun 18:00")).strip().lower()
+    if overview in ("", "off", "none"):
+        overview_weekday, overview_min = None, 0
+    else:
+        try:
+            day_text, time_text = overview.split()
+            overview_weekday, overview_min = DAY_KEYS.index(day_text[:3]), parse_hhmm(time_text)
+        except ValueError:
+            raise ConfigError('events.weekly_overview must look like "sun 18:00" or "off"') from None
+
     pause = polling.get("pause_between_requests_seconds", [2, 4])
     quiet = polling.get("quiet_hours", ["23:00", "07:00"])
     quiet_hours = (parse_hhmm(quiet[0]), parse_hhmm(quiet[1])) if quiet else None
@@ -212,6 +234,13 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         user_agent=str(polling.get("user_agent", "padel-court-bot/1.0 (personal availability watcher)")),
         only_preferred=bool(notify.get("only_preferred", False)),
         telegram_commands=bool(notify.get("telegram_commands", True)),
+        events_enabled=bool(events.get("enabled", True)),
+        event_words=tuple(str(w) for w in events.get("watch", [])),
+        events_interval_s=events_interval_s,
+        events_days_ahead=int(events.get("days_ahead", 120)),
+        events_times_utc=_api_times_utc(events.get("api_times", "utc")),
+        overview_weekday=overview_weekday,
+        overview_min=overview_min,
         alert_after_failed_rounds=int(notify.get("alert_after_failed_rounds", 6)),
         state_file=config_path.parent / str(data.get("state_file", "state.json")),
         club_file=config_path.parent / "club.json",

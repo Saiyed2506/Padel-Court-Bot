@@ -169,6 +169,35 @@ def parse_club_page(html: str, url: str) -> Club:
     )
 
 
+_SKIP_BLOCKS = re.compile(r"(?is)<(script|style|noscript|svg)[^>]*>.*?</\1>")
+_TAG = re.compile(r"(?s)<[^>]+>")
+_HREF = re.compile(r'href="([^"#]{2,300})"')
+
+
+def page_lines(html: str, limit: int = 600, dedupe: bool = False) -> list[str]:
+    """The text a visitor reads on a page, one entry per text element, in order."""
+    import html as html_lib
+
+    text = _TAG.sub("\n", _SKIP_BLOCKS.sub(" ", html))
+    out: list[str] = []
+    for line in text.split("\n"):
+        line = re.sub(r"\s+", " ", html_lib.unescape(line)).strip()
+        if line and len(line) <= 300 and not (dedupe and line in out):
+            out.append(line)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def page_links(html: str, pattern: str) -> list[str]:
+    """Distinct link targets matching a regex, in page order."""
+    seen: list[str] = []
+    for href in _HREF.findall(html):
+        if re.search(pattern, href) and href not in seen:
+            seen.append(href)
+    return seen
+
+
 def save_club(club: Club, path: Path) -> None:
     path.write_text(json.dumps(asdict(club), indent=1, ensure_ascii=False), encoding="utf-8")
 
@@ -202,6 +231,9 @@ class PlaytomicClient:
             raise PlaytomicError(f"HTTP {exc.code} for {label}{hint}", status=exc.code, retryable=retryable) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             raise PlaytomicError(f"network error for {label}: {getattr(exc, 'reason', exc)}") from None
+
+    def fetch_page(self, url: str) -> str:
+        return self._fetch(url, "text/html,application/xhtml+xml")
 
     def get_club_page(self, club_url: str) -> Club:
         return parse_club_page(self._fetch(club_url, "text/html,application/xhtml+xml"), club_url)

@@ -189,6 +189,36 @@ Days can be `mon`..`sun` (or German `mo`, `di`, ...), `mon-fri`, `sat,sun`,
 `weekdays` or `weekend`. Wishes are saved in `wishes.json`, so they survive a
 restart. After the first change they replace the windows in `config.toml`.
 
+## Club events (Newcomer Club, Afterwork, classes)
+
+The bot also watches club events whose **name contains a word you choose**:
+
+- **Group classes** (Gruppenstunden) come from the club's public page. No login needed.
+- **Open Play events** (like "Newcomer Club mit Coach David") have no public
+  list, so the bot reads them with **your Playtomic login**. Double-click
+  **`playtomic-login.bat`** once. Your password is sent to Playtomic once and
+  **not saved**; only the login token Playtomic returns is kept in
+  `playtomic_token.json` (never uploaded; keep it private). The bot only
+  *reads* the event list; it never books or pays. `py -m padel_bot logout`
+  deletes the token.
+
+What you get in Telegram:
+
+- **🆕 New date:** a watched event publishes a new date (checked every 30 min).
+- **🟢 Spot free again:** a full event gets a cancellation.
+- **📅 Weekly overview:** every Sunday at 18:00, all upcoming dates with spots left.
+
+| Command | What it does |
+|---|---|
+| `/events` | Upcoming dates of watched events, with spots |
+| `/watch Afterwork` | Also watch events with "Afterwork" in the name |
+| `/unwatch 2` | Stop watching name number 2 |
+
+Risk note: the logged-in part uses Playtomic's undocumented app login and
+makes an automated (read-only) request about every 30 minutes during the day.
+Playtomic could notice that and could restrict your account. It can also
+stop working whenever Playtomic changes its app.
+
 ## Updating the bot
 
 Close the bot window, double-click **`update.bat`**, then start `run-bot.bat`
