@@ -90,7 +90,8 @@ def matching_window(slot: Slot, windows: tuple[Window, ...]) -> Window | None:
     day = DAY_KEYS[slot.start.weekday()]
     start = minutes_of_day(slot.start)
     for window in windows:
-        if (day in window.days
+        right_day = slot.start.date() == window.on_date if window.on_date else day in window.days
+        if (right_day
                 and slot.duration in window.durations
                 and start >= window.start_min
                 and start + slot.duration <= window.end_min):

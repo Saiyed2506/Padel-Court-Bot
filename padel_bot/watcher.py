@@ -177,9 +177,10 @@ class Watcher:
         s = self.settings
         messages = build_messages(new_slots, s.club_name,
                                   lambda d: booking_link(s.booking_url, self.club, d))
+        send = getattr(self.notifier, "broadcast", self.notifier.send)  # you + approved friends
         try:
             for text in messages:
-                self.notifier.send(text)
+                send(text)
         except NotifyError as exc:
             log.error("%s - will retry these slots next round", exc)
             # Forget them, so they count as "new" again next round.

@@ -17,7 +17,7 @@ from .wishes import MAX_WISHES, WishError, WishStore, describe, parse_wish
 
 log = logging.getLogger("padel_bot")
 
-HELP = """🎾 Padel bot commands
+HELP = """🎾 Padel bot commands  (or tap 🎾 Menu for buttons)
 
 /wishes - show what I'm watching
 /wish <days> <time> - add a wish, e.g.
@@ -42,6 +42,7 @@ Events (classes, Open Play):
 
 # Shown in Telegram's "/" menu.
 MENU = [
+    ("menu", "Buttons for everything"),
     ("wishes", "Show what I'm watching"),
     ("wish", "Add a wish, e.g. /wish tue 17:00"),
     ("remove", "Delete a wish: /remove 2"),
@@ -58,12 +59,18 @@ MENU = [
 
 
 class CommandCenter:
-    def __init__(self, watcher, notifier, store: WishStore, *,
+    def __init__(self, watcher, notifier, store: WishStore, *, friends=None, runtime=None,
                  monotonic: Callable[[], float] = time.monotonic,
                  sleep: Callable[[float], None] = time.sleep):
+        from .menu import Menu
+
         self.watcher = watcher
         self.notifier = notifier
         self.store = store
+        self.friends = friends      # a Friends list, or None
+        self.runtime = runtime      # RuntimeSettings for button-changed settings, or None
+        self.menu = Menu(self, runtime) if runtime is not None else None
+        self._username: str | None = None
         self.monotonic = monotonic
         self.sleep = sleep
         self.offset: int | None = None
@@ -83,6 +90,17 @@ class CommandCenter:
         paused = "\n\n⏸ Paused - send /resume to get alerts." if self.watcher.paused else ""
         return "I'm watching (indoor doubles):\n" + "\n".join(lines) + paused
 
+    def bot_username(self) -> str:
+        if self._username is None:
+            try:
+                self._username = self.notifier.bot_username()
+            except (NotifyError, AttributeError):
+                return ""
+        return self._username
+
+    def set_windows(self, windows) -> None:
+        self._set_windows(windows)
+
     def _set_windows(self, windows) -> None:
         self.store.save(tuple(windows))
         self.watcher.set_windows(tuple(windows))
@@ -93,6 +111,9 @@ class CommandCenter:
         args = words[1] if len(words) > 1 else ""
         windows = list(self.watcher.settings.windows)
 
+        if self.menu is not None and (command in ("/start", "/menu") or text.strip() == "🎾 Menu"):
+            self.menu.show()
+            return None
         if command in ("/start", "/help"):
             return HELP
         if command in ("/login", "/logout"):
@@ -127,9 +148,13 @@ class CommandCenter:
             return "↩️ Back to the wishes from config.toml.\n\n" + self.wishes_text()
         if command == "/pause":
             self.watcher.paused = True
+            if self.runtime is not None:
+                self.runtime.update(paused=True)
             return "⏸ Paused. No checks and no alerts until you send /resume."
         if command == "/resume":
             self.watcher.paused = False
+            if self.runtime is not None:
+                self.runtime.update(paused=False)
             self.watcher.request_check()
             return "▶️ Resumed. Checking now."
         if command == "/status":
@@ -247,18 +272,79 @@ class CommandCenter:
             log.warning("Could not delete a message: %s", exc)
             return False
 
+    def _button(self, query: dict) -> None:
+        """A tapped menu button. Only taps from your own chat count."""
+        message = query.get("message") or {}
+        chat_id = str((message.get("chat") or {}).get("id", ""))
+        toast = ""
+        if chat_id != str(self.notifier.chat_id) or self.menu is None:
+            toast = "Not allowed"
+        else:
+            try:
+                toast = self.menu.on_callback(str(query.get("data", "")), message.get("message_id"))
+            except Exception:
+                log.exception("Button failed")
+                toast = "Sorry, something went wrong."
+        try:
+            self.notifier.answer_callback(query.get("id", ""), toast)
+        except (NotifyError, AttributeError) as exc:
+            log.warning("Could not answer a button: %s", exc)
+
+    def _stranger(self, chat_id: str, message: dict, text: str) -> None:
+        """A message from someone other than you: a friend, or someone asking to join."""
+        sender = message.get("from") or {}
+        name = " ".join(p for p in (sender.get("first_name"), sender.get("last_name")) if p) or "Someone"
+        if sender.get("username"):
+            name += f" (@{sender['username']})"
+        friends = self.friends
+        status = friends.status(chat_id) if friends else "blocked"
+        reply = None
+        if status == "approved":
+            if text.strip().lower().startswith("/stop"):
+                friends.remove(chat_id)
+                reply = "You won't get padel alerts anymore. Send /start to ask again."
+                self._safe_send(f"👥 {name} left the alerts.")
+            else:
+                reply = "👋 You get the padel court and event alerts from this bot. Send /stop to leave."
+        elif status == "pending":
+            reply = "⏳ Still waiting for approval."
+        elif status == "new":
+            if friends.request(chat_id, name):
+                reply = "👋 Hi! I've asked the owner of this bot to let you receive the padel alerts."
+                buttons = [[(f"✅ Approve", f"fa:{chat_id}"), ("❌ Decline", f"fd:{chat_id}")]]
+                try:
+                    self.notifier.send(f"👥 {name} wants to get your padel alerts.", buttons=buttons)
+                except NotifyError as exc:
+                    log.error("Could not ask you about a friend request: %s", exc)
+        else:  # blocked, or friends feature off
+            if chat_id not in self.ignored_chats:
+                log.warning("Ignoring a message from an unknown Telegram chat (%s)", chat_id)
+                self.ignored_chats.add(chat_id)
+        if reply:
+            try:
+                self.notifier.send(reply, chat_id=chat_id)
+            except NotifyError as exc:
+                log.warning("Could not answer %s: %s", name, exc)
+
+    def _safe_send(self, text: str) -> None:
+        try:
+            self.notifier.send(text)
+        except NotifyError as exc:
+            log.error("%s", exc)
+
     def process(self, updates: list[dict]) -> None:
         for update in updates:
             self.offset = int(update.get("update_id", 0)) + 1
+            if update.get("callback_query"):
+                self._button(update["callback_query"])
+                continue
             message = update.get("message") or {}
             chat_id = str((message.get("chat") or {}).get("id", ""))
             text = message.get("text") or ""
             if not text:
                 continue
             if chat_id != str(self.notifier.chat_id):
-                if chat_id not in self.ignored_chats:
-                    log.warning("Ignoring a message from an unknown Telegram chat (%s)", chat_id)
-                    self.ignored_chats.add(chat_id)
+                self._stranger(chat_id, message, text)
                 continue
             in_login = self.login_step is not None and not text.startswith("/")
             log.info("Command from you: %s", "(login details - hidden)" if in_login else text[:60])
@@ -266,10 +352,16 @@ class CommandCenter:
                 if in_login:
                     reply = self._login_input(text, message.get("message_id"))
                 else:
-                    reply = self.handle(text)
+                    reply = None
+                    if self.menu is not None and not text.startswith("/"):
+                        reply = self.menu.on_text(text)
+                    if reply is None:
+                        reply = self.handle(text)
             except Exception:  # a bug in one command must not stop the watcher
                 log.exception("Command failed")
                 reply = "Sorry, something went wrong with that command."
+            if reply is None:
+                continue
             try:
                 self.notifier.send(reply)
             except NotifyError as exc:

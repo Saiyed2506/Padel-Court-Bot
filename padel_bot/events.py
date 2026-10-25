@@ -331,9 +331,11 @@ class EventWatcher:
 
     # --- alerts --------------------------------------------------------------
 
-    def _send(self, text: str) -> None:
+    def _send(self, text: str, everyone: bool = False) -> None:
+        """everyone=True also sends to approved friends."""
+        send = getattr(self.notifier, "broadcast", self.notifier.send) if everyone else self.notifier.send
         try:
-            self.notifier.send(text)
+            send(text)
         except NotifyError as exc:
             log.error("%s", exc)
 
@@ -367,10 +369,13 @@ class EventWatcher:
             sources = " and ".join(sorted(fresh_kinds))
             sent.append(f"📅 Now watching {sources} events named: {words}\n\n{body}")
             self.state["initialized_kinds"] = sorted(initialized | fresh_kinds)
-        sent += [f"🆕 New date: {describe_event(e)}" for e in new]
-        sent += [f"🟢 Spot free again: {describe_event(e)}" for e in freed]
-        for text in sent:
+        for text in sent:  # the first listing is for you only
             self._send(text)
+        alerts = [f"🆕 New date: {describe_event(e)}" for e in new]
+        alerts += [f"🟢 Spot free again: {describe_event(e)}" for e in freed]
+        for text in alerts:
+            self._send(text, everyone=True)
+        sent += alerts
 
         # Remember the current state; keep old entries of sources that failed.
         kept = {k: v for k, v in previous.items() if v.get("kind_group") in failed}
@@ -420,7 +425,7 @@ class EventWatcher:
         if self.due(now):
             self.check()
         if self.overview_due(now):
-            self._send(self.overview_text())
+            self._send(self.overview_text(), everyone=True)
             self.state["last_overview"] = f"{now.isocalendar().year}-W{now.isocalendar().week}"
             _write_json(self.state_path, self.state)
 

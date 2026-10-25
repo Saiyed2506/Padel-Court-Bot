@@ -167,6 +167,25 @@ told again.
 
 ---
 
+## Buttons (🎾 Menu)
+
+Tap **🎾 Menu** at the bottom of the chat (or send `/menu`):
+
+| Button | What it does |
+|---|---|
+| ➕ Court wish | Every week: pick days → earliest start → latest start → length |
+| 📅 One-time wish | One date only (e.g. Tue 4 Nov 17:00); removed after that day |
+| 🎫 Event | Watched event names and their dates; add or remove names |
+| 📋 My wishes | Everything you watch, each with a 🗑 delete button |
+| 👥 Friends | Invite link, approve or decline requests, remove friends |
+| ⚙️ Settings | Pause, only ⭐ times, night pause, Playtomic log in/out |
+| 📖 Guide | Short explanation |
+
+**Friends:** send them your bot's link (shown under 👥 Friends). They tap
+Start, you get ✅ Approve / ❌ Decline. Approved friends receive the same court
+and event alerts, but can't change anything; they can leave with `/stop`.
+Settings changed with buttons are kept in `bot_settings.json`.
+
 ## Telling the bot your wishes (Telegram commands)
 
 While `run-bot.bat` is running, send these to your bot in Telegram (or tap the

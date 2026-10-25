@@ -55,6 +55,11 @@ def build_messages(slots: list[Slot], club_name: str, link_for_day) -> list[str]
     return messages
 
 
+def inline_markup(buttons) -> str:
+    return json.dumps({"inline_keyboard": [
+        [{"text": label, "callback_data": data[:64]} for label, data in row] for row in buttons]})
+
+
 class TelegramNotifier:
     def __init__(self, bot_token: str, chat_id: str, timeout_s: float = 20.0):
         self._token = bot_token
@@ -77,16 +82,44 @@ class TelegramNotifier:
             raise NotifyError(f"Telegram {method} failed: {data.get('description')}")
         return data
 
-    def send(self, text: str) -> None:
-        self._call("sendMessage", {
-            "chat_id": self.chat_id,
+    def send(self, text: str, *, buttons=None, keyboard=None, chat_id: str | None = None):
+        """Send a message; returns its message_id.
+
+        buttons: rows of (label, callback_data) shown under the message.
+        keyboard: rows of labels shown instead of the phone keyboard.
+        """
+        params = {
+            "chat_id": chat_id or self.chat_id,
             "text": text[:TELEGRAM_LIMIT],
             "disable_web_page_preview": "true",
-        })
+        }
+        if buttons is not None:
+            params["reply_markup"] = inline_markup(buttons)
+        elif keyboard is not None:
+            params["reply_markup"] = json.dumps({
+                "keyboard": [[{"text": label} for label in row] for row in keyboard],
+                "resize_keyboard": True, "is_persistent": True})
+        return self._call("sendMessage", params).get("result", {}).get("message_id")
+
+    def edit(self, message_id, text: str, *, buttons=None, chat_id: str | None = None) -> None:
+        """Change a message in place (used by menus). 'Not modified' is fine."""
+        params = {"chat_id": chat_id or self.chat_id, "message_id": str(message_id),
+                  "text": text[:TELEGRAM_LIMIT], "disable_web_page_preview": "true"}
+        if buttons is not None:
+            params["reply_markup"] = inline_markup(buttons)
+        try:
+            self._call("editMessageText", params)
+        except NotifyError as exc:
+            if "not modified" not in str(exc):
+                raise
+
+    def answer_callback(self, callback_id: str, text: str = "") -> None:
+        """Stop the little spinner on a tapped button (optionally with a toast)."""
+        self._call("answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:200]})
 
     def get_updates(self, offset: int | None, timeout: int = 25) -> list[dict]:
         """New messages to the bot, waiting up to `timeout` s for one (long polling)."""
-        params = {"timeout": str(timeout), "allowed_updates": '["message"]'}
+        params = {"timeout": str(timeout), "allowed_updates": '["message","callback_query"]'}
         if offset is not None:
             params["offset"] = str(offset)
         return self._call("getUpdates", params, timeout_s=timeout + 15).get("result", [])

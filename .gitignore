@@ -21,3 +21,7 @@ events_state.json
 events_state.json.tmp
 event_words.json
 event_words.json.tmp
+friends.json
+friends.json.tmp
+bot_settings.json
+bot_settings.json.tmp

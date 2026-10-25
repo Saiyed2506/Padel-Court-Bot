@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import tomllib
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from .timeutil import DAY_KEYS, parse_hhmm
@@ -26,6 +27,7 @@ class Window:
     end_min: int                  # the game must END by this time
     durations: frozenset[int]     # e.g. {90}
     preferred_starts: frozenset[int] = frozenset()
+    on_date: date | None = None   # set = a one-time wish for that date only (days ignored)
 
 
 @dataclass(frozen=True)

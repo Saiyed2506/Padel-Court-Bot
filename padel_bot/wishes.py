@@ -10,8 +10,10 @@ import json
 import os
 from pathlib import Path
 
+from datetime import date, datetime
+
 from .config import Window
-from .timeutil import DAY_KEYS, parse_hhmm
+from .timeutil import DAY_KEYS, format_day, parse_hhmm
 
 MAX_WISHES = 10
 _DAY_GROUPS = {
@@ -135,7 +137,9 @@ def describe(window: Window) -> str:
         when = (f"{hhmm(window.start_min)}-{hhmm(window.end_min)} "
                 f"(starts {hhmm(window.start_min)}-{hhmm(last_start)})")
     lengths = "/".join(str(d) for d in sorted(window.durations))
-    text = f"{describe_days(window.days)} {when}, {lengths} min"
+    days = f"{format_day(datetime(window.on_date.year, window.on_date.month, window.on_date.day))} (once)" \
+        if window.on_date else describe_days(window.days)
+    text = f"{days} {when}, {lengths} min"
     stars = sorted(window.preferred_starts)
     if stars and not (last_start == window.start_min and stars == [window.start_min]):
         text += ", ⭐ " + " ".join(hhmm(p) for p in stars)
@@ -149,6 +153,7 @@ def _to_json(window: Window) -> dict:
         "end": hhmm(window.end_min),
         "duration_minutes": sorted(window.durations),
         "preferred_starts": [hhmm(p) for p in sorted(window.preferred_starts)],
+        **({"date": window.on_date.isoformat()} if window.on_date else {}),
     }
 
 
@@ -159,7 +164,13 @@ def _from_json(raw: dict) -> Window:
         end_min=parse_hhmm(raw["end"]),
         durations=frozenset(int(d) for d in raw["duration_minutes"]),
         preferred_starts=frozenset(parse_hhmm(p) for p in raw.get("preferred_starts", [])),
+        on_date=date.fromisoformat(raw["date"]) if raw.get("date") else None,
     )
+
+
+def drop_past(windows, today: date) -> tuple[Window, ...]:
+    """One-time wishes disappear once their date has passed."""
+    return tuple(w for w in windows if w.on_date is None or w.on_date >= today)
 
 
 class WishStore:
@@ -167,14 +178,15 @@ class WishStore:
         self.path = path
         self.defaults = tuple(defaults)
 
-    def load(self) -> tuple[Window, ...]:
+    def load(self, today: date | None = None) -> tuple[Window, ...]:
         if not self.path.exists():
             return self.defaults
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            return tuple(_from_json(w) for w in raw["wishes"])
+            windows = tuple(_from_json(w) for w in raw["wishes"])
         except (ValueError, KeyError, TypeError):
             return self.defaults  # damaged file: fall back to config.toml
+        return drop_past(windows, today or date.today())
 
     def save(self, windows: tuple[Window, ...]) -> None:
         tmp = self.path.with_suffix(".json.tmp")

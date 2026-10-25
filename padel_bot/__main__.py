@@ -21,6 +21,8 @@ from .timeutil import club_timezone, format_day, format_time
 from .account import PlaytomicAccount
 from .commands import CommandCenter
 from .events import EventWatcher, EventWords
+from .friends import Broadcaster, Friends
+from .menu import MENU_BUTTON, RuntimeSettings
 from .watcher import Watcher
 from .wishes import WishStore
 
@@ -175,7 +177,9 @@ def cmd_explore_events(args, settings: Settings) -> int:
 
 def cmd_run(args, settings: Settings) -> int:
     tz = club_timezone()
-    notifier = telegram_from_env()
+    home = settings.state_file.parent
+    friends = Friends(home / "friends.json")
+    notifier = Broadcaster(telegram_from_env(), friends)  # alerts go to you + approved friends
     booker = AutoBooker(settings.auto_book, confirm=lambda slot: False)  # confirmation flow: future work
     if settings.auto_book.enabled:
         log.warning("Auto-book is ON in DRY-RUN mode (max €%g): it will only log what it would do.",
@@ -189,16 +193,20 @@ def cmd_run(args, settings: Settings) -> int:
     settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
                       SeenState(settings.state_file), tz, booker)
+    runtime = RuntimeSettings(home / "bot_settings.json")
+    runtime.apply(watcher)  # pause / night pause / only-⭐ set with buttons earlier
     if settings.events_enabled:
-        words = EventWords(settings.state_file.parent / "event_words.json", list(settings.event_words))
-        watcher.events = EventWatcher(settings, PlaytomicClient(settings.user_agent), account_for(settings),
-                                      club, tz, settings.state_file.parent / "events_state.json", words, notifier)
+        words = EventWords(home / "event_words.json", list(settings.event_words))
+        watcher.events = EventWatcher(watcher.settings, PlaytomicClient(settings.user_agent), account_for(settings),
+                                      club, tz, home / "events_state.json", words, notifier)
     if settings.telegram_commands:
-        watcher.commands = CommandCenter(watcher, notifier, store)
+        watcher.commands = CommandCenter(watcher, notifier, store, friends=friends, runtime=runtime)
         watcher.commands.register_menu()
     try:
-        notifier.send("✅ Padel bot started.\n\n" + (watcher.commands.wishes_text() if watcher.commands else "")
-                      + ("\n\nSend /help to see what you can tell me." if watcher.commands else ""))
+        status = "⏸ paused - tap 🎾 Menu → Settings to resume" if watcher.paused else "watching"
+        notifier.send(f"✅ Padel bot started ({status}).\n\n"
+                      + (watcher.commands.wishes_text() + "\n\nTap 🎾 Menu below for buttons." if watcher.commands else ""),
+                      **({"keyboard": [[MENU_BUTTON]]} if watcher.commands else {}))
     except NotifyError as exc:
         log.error("Could not send the start message: %s", exc)
     log.info("Watching days 0-%d. Press Ctrl+C to stop.", settings.days_ahead)

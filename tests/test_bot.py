@@ -246,10 +246,21 @@ class FakeNotifier:
         self.sent: list[str] = []
         self.fail = False
 
-    def send(self, text):
+    def send(self, text, buttons=None, keyboard=None, chat_id=None):
         if self.fail:
             raise NotifyError("offline")
         self.sent.append(text)
+        self.outbox = getattr(self, "outbox", [])
+        self.outbox.append({"text": text, "buttons": buttons, "keyboard": keyboard, "chat_id": chat_id})
+        return len(self.outbox)
+
+    def edit(self, message_id, text, buttons=None, chat_id=None):
+        self.edits = getattr(self, "edits", [])
+        self.edits.append({"id": message_id, "text": text, "buttons": buttons})
+
+    def answer_callback(self, callback_id, text=""):
+        self.toasts = getattr(self, "toasts", [])
+        self.toasts.append(text)
 
 
 class WatcherTests(unittest.TestCase):
@@ -960,3 +971,167 @@ class TelegramLoginTests(unittest.TestCase):
         self.watcher.events.account.logged_in = True
         self.assertIn("Logged out", self.cc.handle("/logout"))
         self.assertFalse(self.watcher.events.account.logged_in)
+
+
+class MenuTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.commands import CommandCenter
+        from padel_bot.events import EventWords
+        from padel_bot.friends import Broadcaster, Friends
+        from padel_bot.menu import RuntimeSettings
+        from padel_bot.wishes import WishStore
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.s = settings(tmp)
+        self.now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)  # Monday
+        self.telegram = FakeTelegram()
+        self.telegram.bot_username = lambda: "padel_test_bot"
+        self.friends = Friends(tmp / "friends.json")
+        self.bc = Broadcaster(self.telegram, self.friends)
+        self.client = FakeClient()
+        self.watcher = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
+                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               clock=lambda: self.now, sleep=lambda s: None)
+
+        class Events:
+            words = EventWords(tmp / "event_words.json", ["Newcomer"])
+            account = None
+            last_check = None
+            open_play_problem = None
+            restarted = 0
+            def restart_watching(ev):
+                ev.restarted += 1
+        self.watcher.events = Events()
+        self.runtime = RuntimeSettings(tmp / "bot_settings.json")
+        self.store = WishStore(tmp / "wishes.json", self.s.windows)
+        self.cc = CommandCenter(self.watcher, self.bc, self.store, friends=self.friends, runtime=self.runtime)
+        self.menu = self.cc.menu
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def tap(self, data, chat_id=42):
+        self.cc.process([{"update_id": 1, "callback_query": {
+            "id": "q", "data": data, "message": {"message_id": 7, "chat": {"id": chat_id}}}}])
+        return self.telegram.toasts[-1]
+
+    def last_screen(self):
+        return self.telegram.edits[-1]
+
+    def labels(self):
+        return [label for row in self.last_screen()["buttons"] for label, _ in row]
+
+    def test_menu_command_and_button(self):
+        self.cc.process([message(1, "/start")])
+        self.assertEqual(self.telegram.outbox[0]["keyboard"], [["🎾 Menu"]])
+        self.assertIn("➕ Court wish", [b for row in self.telegram.outbox[1]["buttons"] for b, _ in row])
+        self.cc.process([message(2, "🎾 Menu")])
+        self.assertEqual(len(self.telegram.outbox), 4)
+
+    def test_recurring_wish_by_buttons(self):
+        self.tap("cw")
+        self.tap("d:ok")
+        self.assertEqual(self.telegram.toasts[-1], "Pick at least one day")
+        self.tap("d:tue")
+        self.tap("d:thu")
+        self.assertIn("✅ Tue", self.labels())
+        self.tap("d:ok")
+        self.tap(f"s:{17 * 60}")
+        self.assertIn("Only 17:00", self.labels())
+        self.tap(f"l:{18 * 60}")
+        self.tap("u:90")
+        self.assertIn("Tue, Thu 17:00-19:30 (starts 17:00-18:00), 90 min", self.last_screen()["text"])
+        self.assertEqual(self.tap("ok"), "Added")
+        self.assertEqual(len(self.watcher.settings.windows), 3)
+        self.assertEqual(len(self.store.load()), 3)          # saved
+
+    def test_one_time_wish_matches_only_that_date(self):
+        self.tap("ow")
+        self.assertIn("Today", self.labels())
+        self.tap("dt:2026-10-29")                            # Thursday
+        self.tap(f"s:{20 * 60}")
+        self.tap(f"l:{20 * 60}")                             # exactly 20:00
+        self.tap("u:60")
+        self.assertIn("Thu 29 Oct (once) 20:00-21:00, 60 min", self.last_screen()["text"])
+        self.tap("ok")
+        # a free 20:00 hour on Thursday matches; the same on Wednesday doesn't
+        self.client.replies["2026-10-29"] = [avail("c1", "2026-10-29", ("19:00:00", 60, "30 EUR"))]
+        self.client.replies["2026-10-28"] = [avail("c1", "2026-10-28", ("19:00:00", 60, "30 EUR"))]
+        found = self.watcher.run_round()
+        self.assertEqual([(s.start.date(), s.start.hour) for s in found], [(date(2026, 10, 29), 20)])
+        # after the date it disappears from the list
+        self.now = datetime(2026, 10, 30, 9, 0, tzinfo=TZ)
+        self.tap("mw")
+        self.assertNotIn("once", self.last_screen()["text"])
+        self.assertEqual(len(self.store.load(today=date(2026, 10, 30))), 2)
+
+    def test_delete_wish_and_event_buttons(self):
+        self.tap("mw")
+        delete = [d for row in self.last_screen()["buttons"] for _, d in row if d.startswith("dw:0:")][0]
+        self.assertTrue(self.tap(delete).startswith("Deleted: Mon-Fri"))
+        self.assertEqual(len(self.watcher.settings.windows), 1)
+        self.assertIn("outdated", self.tap(delete))          # same button again: safe
+        word = [d for row in self.last_screen()["buttons"] for _, d in row if d.startswith("de:0:")][0]
+        self.assertIn("Stopped watching 'Newcomer'", self.tap(word))
+        self.assertEqual(self.watcher.events.words.load(), [])
+
+    def test_add_event_name_by_typing(self):
+        self.tap("ev")
+        self.tap("ea")
+        self.cc.process([message(3, "Afterwork")])
+        self.assertIn("Watching events named 'Afterwork'", self.telegram.sent[-1])
+        self.assertEqual(self.watcher.events.words.load(), ["Newcomer", "Afterwork"])
+
+    def test_settings_persist(self):
+        from padel_bot.menu import RuntimeSettings
+        self.tap("st")
+        self.assertEqual(self.tap("sp"), "Paused")
+        self.assertEqual(self.tap("so"), "Only ⭐ times")
+        self.assertIn("00:00-07:00", self.tap("sq"))
+        self.assertIn("01:00-06:00", self.tap("sq"))
+        self.assertIn("off", self.tap("sq").lower())  # 23-07 -> 00-07 -> 01-06 -> off
+        fresh = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
+                        AutoBooker(self.s.auto_book, confirm=lambda s: False), clock=lambda: self.now)
+        RuntimeSettings(Path(self.tmp.name) / "bot_settings.json").apply(fresh)
+        self.assertTrue(fresh.paused)
+        self.assertTrue(fresh.settings.only_preferred)
+        self.assertIsNone(fresh.settings.quiet_hours)
+
+    def test_buttons_from_strangers_are_refused(self):
+        self.assertEqual(self.tap("sp", chat_id=666), "Not allowed")
+        self.assertFalse(self.watcher.paused)
+
+    def test_friend_request_approve_alerts_and_leave(self):
+        friend = {"update_id": 5, "message": {"message_id": 1, "chat": {"id": 777},
+                                              "from": {"first_name": "Ali", "username": "ali_p"}, "text": "/start"}}
+        self.cc.process([friend])
+        ask = self.telegram.outbox[-1]
+        self.assertEqual(ask["chat_id"], "777")              # friend told to wait
+        request = self.telegram.outbox[-2]
+        self.assertIn("Ali (@ali_p) wants to get your padel alerts", request["text"])
+        self.assertEqual(request["buttons"][0][0][1], "fa:777")
+        self.cc.process([friend])
+        self.assertIn("Still waiting", self.telegram.outbox[-1]["text"])
+        self.assertEqual(self.tap("fa:777"), "Approved Ali (@ali_p)")
+        # alerts now reach both of you
+        self.client.replies["2026-10-27"] = [avail("c2", "2026-10-27", ("16:00:00", 90, "48 EUR"))]
+        self.watcher.run_round()
+        alert_targets = [m["chat_id"] for m in self.telegram.outbox if "Free:" in m["text"]]
+        self.assertEqual(alert_targets, [None, "777"])
+        # but the friend can't control anything
+        self.cc.process([{"update_id": 6, "message": {"chat": {"id": 777}, "from": {"first_name": "Ali"}, "text": "/pause"}}])
+        self.assertFalse(self.watcher.paused)
+        self.cc.process([{"update_id": 7, "message": {"chat": {"id": 777}, "from": {"first_name": "Ali"}, "text": "/stop"}}])
+        self.assertEqual(self.friends.approved, {})
+
+    def test_declined_stranger_is_ignored(self):
+        stranger = {"update_id": 5, "message": {"chat": {"id": 888}, "from": {"first_name": "X"}, "text": "hi"}}
+        self.cc.process([stranger])
+        self.tap("fd:888")
+        before = len(self.telegram.outbox)
+        self.cc.process([stranger])
+        self.assertEqual(len(self.telegram.outbox), before)
+
+    def test_friends_screen_shows_invite_link(self):
+        self.tap("fr")
+        self.assertIn("https://t.me/padel_test_bot", self.last_screen()["text"])
