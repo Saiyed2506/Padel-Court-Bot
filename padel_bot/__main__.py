@@ -105,6 +105,16 @@ def cmd_telegram_chat_id(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_setup(args, settings: Settings) -> int:
+    from .setup_wizard import run_setup
+
+    def run_check(days: int) -> None:
+        fresh = load_settings(args.config)
+        cmd_check(argparse.Namespace(all=True, days=days), fresh)
+
+    return run_setup(args.config, run_check)
+
+
 def cmd_run(args, settings: Settings) -> int:
     tz = club_timezone()
     notifier = telegram_from_env()
@@ -131,6 +141,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config.toml"), help="path to config.toml")
     parser.add_argument("-v", "--verbose", action="store_true", help="more detailed logs")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("setup", help="guided first-time setup (Telegram + club)")
+    p.set_defaults(func=cmd_setup, needs_tenant=False)
 
     p = sub.add_parser("find-club", help="look up the club's tenant_id and courts")
     p.add_argument("--search", default="amigos", help="part of the club name (default: amigos)")

@@ -44,7 +44,24 @@ never needs your Playtomic password.
 
 ---
 
-## Setup on Windows (one time, about 20 minutes)
+## Easiest setup: double-click (Windows)
+
+1. Download the code (log in to GitHub in your browser first):
+   https://github.com/Saiyed2506/Padel-Court-Bot/archive/refs/heads/ccr-7f8b936d-chkl4x.zip
+2. Open your Downloads folder, right-click the ZIP → **Extract All** → **Extract**.
+3. In the extracted folder, double-click **`START-HERE.bat`**.
+   - If Windows shows "Windows protected your PC", click **More info** → **Run anyway**.
+   - If Python is missing, it opens the download page and tells you what to click.
+     Install it, then double-click `START-HERE.bat` again.
+4. Answer the questions in the black window. It walks you through creating
+   the Telegram bot, finds the club, sends a test message and shows free slots
+   to compare with the app.
+5. When it says **All set**, double-click **`run-bot.bat`** to start watching.
+   Keep that window open. Close it to stop.
+
+The manual steps below do the same thing by hand.
+
+## Manual setup on Windows (one time, about 20 minutes)
 
 All commands go into **PowerShell**: press Start, type `powershell`, press Enter.
 
@@ -206,6 +223,7 @@ padel_bot/
   watcher.py    polling loop, scheduling, error handling
   state.py      remembers which slots you were already told about
   notify.py     message text and Telegram sending
+  setup_wizard.py  guided setup behind START-HERE.bat
   booking.py    auto-book safety rules (disabled)
   timeutil.py   Hamburg time zone (works on Windows without extra packages)
 config.toml     your settings      .env  your secrets (not in git)

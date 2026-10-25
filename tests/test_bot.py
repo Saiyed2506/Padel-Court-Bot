@@ -333,3 +333,60 @@ class ParseClubTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SetupWizardTests(unittest.TestCase):
+    def test_write_env_values_keeps_other_lines(self):
+        from padel_bot.setup_wizard import write_env_values
+        with tempfile.TemporaryDirectory() as tmp:
+            env = Path(tmp) / ".env"
+            env.write_text("# comment\nTELEGRAM_BOT_TOKEN=\nOTHER=1\n", encoding="utf-8")
+            write_env_values(env, {"TELEGRAM_BOT_TOKEN": "123:abc", "TELEGRAM_CHAT_ID": "42"})
+            self.assertEqual(env.read_text(encoding="utf-8"),
+                             "# comment\nTELEGRAM_BOT_TOKEN=123:abc\nOTHER=1\nTELEGRAM_CHAT_ID=42\n")
+
+    def test_set_tenant_id(self):
+        from padel_bot.setup_wizard import set_tenant_id
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.toml"
+            path.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
+            set_tenant_id(path, "abc-123")
+            self.assertEqual(load_settings(path).tenant_id, "abc-123")
+
+    def test_full_wizard_flow(self):
+        from unittest import mock
+        from padel_bot import setup_wizard
+        from padel_bot.playtomic import Club
+
+        token = "123456789:" + "A" * 35
+        telegram_calls = []
+
+        def fake_call(self, method, params):
+            telegram_calls.append((method, params))
+            if method == "getMe":
+                return {"ok": True, "result": {"username": "padel_test_bot"}}
+            if method == "getUpdates":
+                return {"ok": True, "result": [{"message": {"chat": {"id": 42, "first_name": "Me"}}}]}
+            return {"ok": True}
+
+        club = Club("T1", "padel amigos Hamburg-Halstenbek", "Halstenbek",
+                    tuple(c for c in COURTS.values()) + (Court("c3", "Court 3", True, "double"),
+                                                          Court("c4", "Court 4", True, "double")))
+        answers = iter(["not a token", token, "", "y", "y"])
+        checked = []
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text((REPO / "config.toml").read_text(encoding="utf-8"), encoding="utf-8")
+            with mock.patch("builtins.input", lambda prompt="": next(answers)), \
+                 mock.patch("builtins.print"), \
+                 mock.patch.object(setup_wizard.TelegramNotifier, "_call", fake_call), \
+                 mock.patch.object(setup_wizard.PlaytomicClient, "find_clubs", lambda self, *a: [club]), \
+                 mock.patch.dict("os.environ", {}, clear=False):
+                self.assertEqual(setup_wizard.run_setup(config, lambda days: checked.append(days)), 0)
+            env = (Path(tmp) / ".env").read_text(encoding="utf-8")
+            self.assertIn(f"TELEGRAM_BOT_TOKEN={token}", env)
+            self.assertIn("TELEGRAM_CHAT_ID=42", env)
+            self.assertEqual(load_settings(config).tenant_id, "T1")
+        self.assertEqual(checked, [1])
+        sent = [p for m, p in telegram_calls if m == "sendMessage"]
+        self.assertEqual(sent[0]["chat_id"], "42")

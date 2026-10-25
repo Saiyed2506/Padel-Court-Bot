@@ -83,6 +83,10 @@ class TelegramNotifier:
             "disable_web_page_preview": "true",
         })
 
+    def bot_username(self) -> str:
+        """Checks the token works; returns the bot's @username."""
+        return str(self._call("getMe", {})["result"].get("username", ""))
+
     def recent_chats(self) -> list[tuple[str, str]]:
         """(chat_id, name) of people who recently messaged the bot; for setup."""
         data = self._call("getUpdates", {"timeout": "0"})
