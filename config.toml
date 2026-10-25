@@ -21,6 +21,12 @@ exclude_names = []      # e.g. ["Court 4"] to ignore a court by name
 # Courts open 14 days ahead (today 25 Oct -> bookable until 8 Nov), so watch
 # today plus the next 14 days.
 days_ahead = 14
+# The club lets you cancel for free up to this many hours before a game.
+# Alerts for games starting sooner get a warning; "I booked it" reminds you
+# 48h before a game, i.e. 24h before free cancellation ends.
+free_cancellation_hours = 24
+# Skip alerts for games starting sooner than this (hours). 0 = alert for all.
+min_notice_hours = 0
 
 # A slot matches when the whole game fits inside a window:
 # weekday 16:00-20:30 with 90 min => starts 16:00, 16:30, ... 19:00.
@@ -53,6 +59,7 @@ user_agent = "padel-court-bot/1.0 (personal availability watcher)"
 only_preferred = false        # true = only alert for 16:30 / 17:00 on weekdays
 alert_after_failed_rounds = 6 # warn you on Telegram if checks keep failing
 telegram_commands = true      # change wishes from Telegram: send /help to the bot
+daily_report = "08:00"        # daily "still watching" message; "off" to disable
 
 [auto_book]
 # Not implemented yet. Even when enabled, only dry-run (log only) is allowed.

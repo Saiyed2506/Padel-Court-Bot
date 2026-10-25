@@ -31,14 +31,21 @@ def format_price(slot: Slot) -> str:
     return f"€{slot.price_eur:.0f}" if slot.price_eur.is_integer() else f"€{slot.price_eur:.2f}"
 
 
-def format_slot(slot: Slot, link: str) -> str:
+def cancel_warning(start, now, free_cancel_min: int) -> str:
+    """' ⚠️ <24h: no free cancellation' when a game is too close to cancel for free."""
+    if now is None or not free_cancel_min or (start - now).total_seconds() >= free_cancel_min * 60:
+        return ""
+    return f" ⚠️ <{free_cancel_min // 60}h: no free cancellation"
+
+
+def format_slot(slot: Slot, link: str, now=None, free_cancel_min: int = 0) -> str:
     """'Free: Tue 28 Oct, 17:00-18:30, Court 2 indoor, €48. Book: <link>'"""
     star = "⭐ " if slot.preferred else ""
     return (f"{star}Free: {format_day(slot.start)}, {format_time(slot.start)}-{format_time(slot.end)}, "
-            f"{slot.court_name} indoor, {format_price(slot)}. Book: {link}")
+            f"{slot.court_name} indoor, {format_price(slot)}.{cancel_warning(slot.start, now, free_cancel_min)} Book: {link}")
 
 
-def build_messages(slots: list[Slot], club_name: str, link_for_day) -> list[str]:
+def build_messages(slots: list[Slot], club_name: str, link_for_day, now=None, free_cancel_min: int = 0) -> list[str]:
     """One alert text (split into several if Telegram's size limit requires)."""
     if not slots:
         return []
@@ -46,7 +53,7 @@ def build_messages(slots: list[Slot], club_name: str, link_for_day) -> list[str]
     messages: list[str] = []
     current = header
     for slot in slots:
-        line = format_slot(slot, link_for_day(slot.start.date()))
+        line = format_slot(slot, link_for_day(slot.start.date()), now, free_cancel_min)
         if len(current) + 2 + len(line) > TELEGRAM_LIMIT:
             messages.append(current)
             current = f"{header} (continued)"
@@ -82,7 +89,7 @@ class TelegramNotifier:
             raise NotifyError(f"Telegram {method} failed: {data.get('description')}")
         return data
 
-    def send(self, text: str, *, buttons=None, keyboard=None, chat_id: str | None = None):
+    def send(self, text: str, *, buttons=None, keyboard=None, chat_id: str | None = None, silent: bool = False):
         """Send a message; returns its message_id.
 
         buttons: rows of (label, callback_data) shown under the message.
@@ -93,6 +100,8 @@ class TelegramNotifier:
             "text": text[:TELEGRAM_LIMIT],
             "disable_web_page_preview": "true",
         }
+        if silent:
+            params["disable_notification"] = "true"  # arrives without sound/vibration
         if buttons is not None:
             params["reply_markup"] = inline_markup(buttons)
         elif keyboard is not None:
@@ -123,6 +132,9 @@ class TelegramNotifier:
         if offset is not None:
             params["offset"] = str(offset)
         return self._call("getUpdates", params, timeout_s=timeout + 15).get("result", [])
+
+    def chat_first_name(self, chat_id) -> str:
+        return str(self._call("getChat", {"chat_id": str(chat_id)}).get("result", {}).get("first_name", ""))
 
     def delete_message(self, message_id) -> None:
         self._call("deleteMessage", {"chat_id": self.chat_id, "message_id": str(message_id)})

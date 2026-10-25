@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
+from datetime import datetime
 from typing import Callable
 
 from .notify import NotifyError, booking_link, build_messages
@@ -202,7 +203,8 @@ class CommandCenter:
             when = w.last_round_at.strftime("%H:%M") if w.last_round_at else "not yet"
             return f"No free slots match your wishes right now (last check: {when})."
         messages = build_messages(slots, w.settings.club_name,
-                                  lambda d: booking_link(w.settings.booking_url, w.club, d))
+                                  lambda d: booking_link(w.settings.booking_url, w.club, d),
+                                  w.clock(), w.settings.free_cancel_min)
         text = messages[0].replace("new free court slot(s)", "free slot(s) right now", 1)
         return text if len(messages) == 1 else text + "\n\n(more than fit in one message)"
 
@@ -276,8 +278,19 @@ class CommandCenter:
         """A tapped menu button. Only taps from your own chat count."""
         message = query.get("message") or {}
         chat_id = str((message.get("chat") or {}).get("id", ""))
+        data = str(query.get("data", ""))
         toast = ""
-        if chat_id != str(self.notifier.chat_id) or self.menu is None:
+        if data.startswith("p:") and self.watcher.polls is not None:
+            # "who's in?" votes: you and approved friends
+            _, choice, pid = (data.split(":") + ["", ""])[:3]
+            try:
+                toast = self.watcher.polls.vote(pid, chat_id, choice)
+            except Exception:
+                log.exception("Vote failed")
+                toast = "Sorry, something went wrong."
+        elif data.startswith("bk:"):
+            toast = self._booked(chat_id, data)
+        elif chat_id != str(self.notifier.chat_id) or self.menu is None:
             toast = "Not allowed"
         else:
             try:
@@ -289,6 +302,28 @@ class CommandCenter:
             self.notifier.answer_callback(query.get("id", ""), toast)
         except (NotifyError, AttributeError) as exc:
             log.warning("Could not answer a button: %s", exc)
+
+    def _booked(self, chat_id: str, data: str) -> str:
+        """'📌 I booked it' from you or an approved friend: remember it for a reminder."""
+        reminders = self.watcher.reminders
+        if reminders is None:
+            return "Reminders are off"
+        if chat_id != str(self.notifier.chat_id) and not (self.friends and chat_id in self.friends.approved):
+            return "Not allowed"
+        _, kind, ref = (data.split(":", 2) + ["", ""])[:3]
+        from .timeutil import format_day, format_time
+        if kind == "c" and self.watcher.polls is not None and ref in self.watcher.polls.polls:
+            poll = self.watcher.polls.polls[ref]
+            start, label = datetime.fromisoformat(poll["start"]), poll.get("label", "a court")
+        elif kind == "e" and self.watcher.events is not None and ref in self.watcher.events.state["events"]:
+            entry = self.watcher.events.state["events"][ref]
+            if not entry.get("start"):
+                return "This event has no date"
+            start = datetime.fromisoformat(entry["start"])
+            label = f"{entry.get('name', 'an event')}, {format_day(start)} {format_time(start)}"
+        else:
+            return "This alert is too old"
+        return reminders.add(chat_id, f"{kind}:{ref}", label, start, self.watcher.clock())
 
     def _stranger(self, chat_id: str, message: dict, text: str) -> None:
         """A message from someone other than you: a friend, or someone asking to join."""

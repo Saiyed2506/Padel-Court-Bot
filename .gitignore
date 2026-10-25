@@ -25,3 +25,7 @@ friends.json
 friends.json.tmp
 bot_settings.json
 bot_settings.json.tmp
+polls.json
+polls.json.tmp
+reminders.json
+reminders.json.tmp

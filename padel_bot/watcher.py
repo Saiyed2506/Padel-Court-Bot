@@ -11,7 +11,7 @@ from typing import Callable
 
 from .booking import AutoBooker
 from .config import Settings
-from .notify import NotifyError, booking_link, build_messages
+from .notify import NotifyError, booking_link, build_messages, format_slot
 from .playtomic import Club, PlaytomicClient, PlaytomicError
 from .rules import Slot, find_matches, parse_availability
 from .state import SeenState
@@ -69,6 +69,26 @@ class Watcher:
         self.matches_by_day: dict[date, list[Slot]] = {}
         self.commands = None  # a CommandCenter, when Telegram commands are on
         self.events = None    # an EventWatcher, when event watching is on
+        self.polls = None     # "who's in?" voting on court alerts
+        self.reminders = None  # "I booked it" -> reminder before free cancellation ends
+        self.muted_days: set[date] = set()
+        self.stats = {"rounds": 0, "errors": 0, "court_alerts": 0}
+        now = self.started_at
+        report = self.settings.daily_report_min
+        # Started after today's report time: the first report comes tomorrow.
+        self.last_report_day = now.date() if report is not None and now.hour * 60 + now.minute >= report else None
+
+    @property
+    def settings(self) -> Settings:
+        return self._settings
+
+    @settings.setter
+    def settings(self, value: Settings) -> None:
+        # Button changes (night pause, buffer, ...) apply to event checks too.
+        self._settings = value
+        events = getattr(self, "events", None)
+        if events is not None:
+            events.settings = value
 
     # --- controls used by Telegram commands ----------------------------
 
@@ -83,7 +103,8 @@ class Watcher:
 
     def current_matches(self) -> list[Slot]:
         now = self.clock()
-        return [s for day in sorted(self.matches_by_day) for s in self.matches_by_day[day] if s.start > now]
+        return [s for day in sorted(self.matches_by_day) for s in self.matches_by_day[day]
+                if s.start > now and day not in self.muted_days]
 
     def status_text(self) -> str:
         now = self.clock()
@@ -101,6 +122,37 @@ class Watcher:
         if self.failed_rounds:
             lines.append(f"⚠️ Last {self.failed_rounds} round(s) had errors: {self.last_error}")
         return "\n".join(lines)
+
+    def daily_report_due(self, now: datetime) -> bool:
+        at = self.settings.daily_report_min
+        return at is not None and now.hour * 60 + now.minute >= at and self.last_report_day != now.date()
+
+    def daily_report_text(self, now: datetime) -> str:
+        st = self.stats
+        events = self.events
+        event_alerts = getattr(events, "alert_count", 0) if events else 0
+        lines = [
+            "☀️ Good morning - I'm still watching." if not self.paused else "☀️ Good morning - I'm running but PAUSED (Settings → Resume).",
+            f"Since the last check-in: {st['rounds']} court checks, {st['court_alerts']} court alert(s), "
+            f"{event_alerts} event alert(s), {st['errors']} error(s).",
+            f"Wishes: {len(self.settings.windows)}"
+            + (f" · Events: {', '.join(events.words.load()) or '-'}" if events else ""),
+        ]
+        if self.settings.min_notice_min:
+            lines.append(f"⏱ Only games at least {self.settings.min_notice_min // 60}h ahead (free cancellation buffer).")
+        if events is not None and events.open_play_problem:
+            lines.append(f"⚠️ {events.open_play_problem}")
+        return "\n".join(lines)
+
+    def _maybe_daily_report(self) -> None:
+        now = self.clock()
+        if not self.daily_report_due(now):
+            return
+        self._safe_send(self.daily_report_text(now))
+        self.last_report_day = now.date()
+        self.stats = {"rounds": 0, "errors": 0, "court_alerts": 0}
+        if self.events is not None:
+            self.events.alert_count = 0
 
     def wait(self, seconds: float) -> None:
         """Sleep, but keep answering Telegram commands if they're on."""
@@ -155,6 +207,8 @@ class Watcher:
                 continue
             self.last_fetch[day] = now
             self.matches_by_day[day] = matches
+            if day in self.muted_days:
+                continue  # not marked as seen, so unmuting brings these alerts back
             new_keys = self.state.update_day(day, {m.key for m in matches})
             new = [m for m in matches if m.key in new_keys]
             if new:
@@ -165,7 +219,11 @@ class Watcher:
         self.matches_by_day = {d: m for d, m in self.matches_by_day.items() if d >= now.date()}
         self.last_round_at = now
         self.rounds += 1
-        new_slots = [s for day in sorted(new_by_day) for s in new_by_day[day]]
+        self.muted_days = {d for d in self.muted_days if d >= now.date()}
+        new_slots = [s for day in sorted(new_by_day) if day not in self.muted_days for s in new_by_day[day]]
+        new_by_day = {d: v for d, v in new_by_day.items() if d not in self.muted_days}
+        self.stats["rounds"] += 1
+        self.stats["errors"] += len(errors)
         if new_slots:
             self._announce(new_slots, new_by_day)
         self.state.save()
@@ -173,20 +231,32 @@ class Watcher:
         log.info("Checked %d day(s): %d new slot(s), %d error(s)", len(due), len(new_slots), len(errors))
         return new_slots
 
+    POLL_LIMIT = 6  # up to this many new slots: one message each, with "who's in?"
+
     def _announce(self, new_slots: list[Slot], new_by_day: dict[date, list[Slot]]) -> None:
         s = self.settings
-        messages = build_messages(new_slots, s.club_name,
-                                  lambda d: booking_link(s.booking_url, self.club, d))
-        send = getattr(self.notifier, "broadcast", self.notifier.send)  # you + approved friends
+        link = lambda d: booking_link(s.booking_url, self.club, d)
+        broadcast = getattr(self.notifier, "broadcast", None)
         try:
-            for text in messages:
-                send(text)
+            if self.polls is not None and len(new_slots) <= self.POLL_LIMIT:
+                for slot in new_slots:
+                    text = (f"🎾 Free court at {s.club_name}\n\n"
+                            f"{format_slot(slot, link(slot.start.date()), self.clock(), s.free_cancel_min)}")
+                    self.polls.post(slot, text, silent=not slot.preferred)  # only ⭐ times ring
+            else:
+                silent = not any(slot.preferred for slot in new_slots)
+                for text in build_messages(new_slots, s.club_name, link, self.clock(), s.free_cancel_min):
+                    if broadcast is not None:
+                        broadcast(text, silent=silent)
+                    else:
+                        self.notifier.send(text)
         except NotifyError as exc:
             log.error("%s - will retry these slots next round", exc)
             # Forget them, so they count as "new" again next round.
             for day, slots in new_by_day.items():
                 self.state.forget_keys(day, {x.key for x in slots})
             return
+        self.stats["court_alerts"] += len(new_slots)
         for slot in new_slots:
             log.info("Alerted: %s %s %s", format_day(slot.start), slot.start.strftime("%H:%M"), slot.court_name)
             decision = self.booker.consider(slot)
@@ -227,6 +297,12 @@ class Watcher:
     def run_forever(self) -> None:
         while True:
             now = self.clock()
+            self._maybe_daily_report()
+            if self.reminders is not None:
+                try:
+                    self.reminders.due(now, silent=in_quiet_hours(now, self.settings.quiet_hours))
+                except Exception:
+                    log.exception("Reminder check failed")
             if self.paused:
                 self.check_requested = False
                 self.wait(300)  # nothing to check; still answer commands

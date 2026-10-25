@@ -186,6 +186,23 @@ Start, you get ✅ Approve / ❌ Decline. Approved friends receive the same cour
 and event alerts, but can't change anything; they can leave with `/stop`.
 Settings changed with buttons are kept in `bot_settings.json`.
 
+## On every court alert
+
+- **⭐ times ring, other alerts arrive silently.**
+- **⚠️ <24h: no free cancellation:** shown when a game starts within the
+  club's free-cancellation limit (24h, `free_cancellation_hours`).
+- **✅ I'm in / ❌ Not me:** you and your friends vote; every copy updates
+  with "👥 In (3/4): ...". With 4 players: "🎉 book it!".
+- **📌 I booked it:** 48h before the game (a day before free cancellation
+  ends) you get "⏰ Free cancellation ends ... Still playing?". Also on event
+  alerts. Listed under 📋 My wishes, removable.
+- **🔕 Mute this day:** no more court alerts for that date (undo in 📋 My wishes).
+- When more than 6 new slots appear at once, they come as one list instead.
+
+Every morning at 08:00 a **☀️ check-in** tells you the bot is alive (checks,
+alerts, errors). If it doesn't come, the bot isn't running. Change or turn
+off under ⚙️ Settings.
+
 ## Telling the bot your wishes (Telegram commands)
 
 While `run-bot.bat` is running, send these to your bot in Telegram (or tap the

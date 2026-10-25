@@ -22,6 +22,8 @@ from .account import PlaytomicAccount
 from .commands import CommandCenter
 from .events import EventWatcher, EventWords
 from .friends import Broadcaster, Friends
+from .polls import Polls
+from .reminders import Reminders
 from .menu import MENU_BUTTON, RuntimeSettings
 from .watcher import Watcher
 from .wishes import WishStore
@@ -193,6 +195,8 @@ def cmd_run(args, settings: Settings) -> int:
     settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
                       SeenState(settings.state_file), tz, booker)
+    watcher.polls = Polls(home / "polls.json", notifier, friends)  # "who's in?" on court alerts
+    watcher.reminders = Reminders(home / "reminders.json", notifier, settings.free_cancel_min)
     runtime = RuntimeSettings(home / "bot_settings.json")
     runtime.apply(watcher)  # pause / night pause / only-⭐ set with buttons earlier
     if settings.events_enabled:

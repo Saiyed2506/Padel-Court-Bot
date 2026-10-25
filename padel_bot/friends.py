@@ -88,10 +88,14 @@ class Broadcaster:
     def send(self, text: str, **kwargs):
         return self.notifier.send(text, **kwargs)
 
-    def broadcast(self, text: str) -> None:
-        self.notifier.send(text)  # raises if *your* alert fails, so it's retried
+    def broadcast(self, text: str, *, buttons=None, friend_buttons=None, silent: bool = False) -> dict[str, int]:
+        """Returns {chat_id: message_id} of every copy sent."""
+        extra = {"silent": True} if silent else {}
+        sent = {str(self.chat_id): self.notifier.send(text, buttons=buttons, **extra)}  # raises if *your* alert fails
         for chat_id, name in list(self.friends.approved.items()):
             try:
-                self.notifier.send(text, chat_id=chat_id)
+                sent[chat_id] = self.notifier.send(text, buttons=friend_buttons if buttons else None,
+                                                   chat_id=chat_id, **extra)
             except NotifyError as exc:
                 log.warning("Could not alert friend %s: %s", name, exc)
+        return sent

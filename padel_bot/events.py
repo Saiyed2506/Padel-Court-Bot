@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from .account import AuthError, PlaytomicAccount
-from .notify import NotifyError
+from .notify import NotifyError, cancel_warning
 from .playtomic import Club, PlaytomicClient, PlaytomicError, page_lines, page_links
 from .timeutil import format_day, format_time
 
@@ -250,6 +250,7 @@ class EventWatcher:
         self.state.setdefault("events", {})
         self.state.setdefault("class_names", {})
         self.upcoming: list[Event] = []
+        self.alert_count = 0  # for the daily check-in
         self.last_check: datetime | None = None
         self.open_play_problem: str | None = None
 
@@ -331,11 +332,14 @@ class EventWatcher:
 
     # --- alerts --------------------------------------------------------------
 
-    def _send(self, text: str, everyone: bool = False) -> None:
+    def _send(self, text: str, everyone: bool = False, buttons=None) -> None:
         """everyone=True also sends to approved friends."""
-        send = getattr(self.notifier, "broadcast", self.notifier.send) if everyone else self.notifier.send
+        broadcast = getattr(self.notifier, "broadcast", None)
         try:
-            send(text)
+            if everyone and broadcast is not None:
+                broadcast(text, **({"buttons": buttons, "friend_buttons": buttons} if buttons else {}))
+            else:
+                self.notifier.send(text)
         except NotifyError as exc:
             log.error("%s", exc)
 
@@ -356,8 +360,11 @@ class EventWatcher:
         for e in events:
             group = _group(e)
             before = previous.get(e.event_id)
+            soon = e.start is not None and (e.start - now).total_seconds() < self.settings.min_notice_min * 60
             if group in fresh_kinds:
                 listing.append(e)  # first successful look at this source: just list it
+            elif soon:
+                pass  # inside the cancellation buffer: no alert (still listed in /events)
             elif before is None:
                 new.append(e)
             elif before.get("spots_left") == 0 and (e.spots_left or 0) > 0:
@@ -371,10 +378,13 @@ class EventWatcher:
             self.state["initialized_kinds"] = sorted(initialized | fresh_kinds)
         for text in sent:  # the first listing is for you only
             self._send(text)
-        alerts = [f"🆕 New date: {describe_event(e)}" for e in new]
-        alerts += [f"🟢 Spot free again: {describe_event(e)}" for e in freed]
-        for text in alerts:
-            self._send(text, everyone=True)
+        warn = lambda e: cancel_warning(e.start, now, self.settings.free_cancel_min) if e.start else ""
+        alerts = [(f"🆕 New date: {describe_event(e)}{warn(e)}", e) for e in new]
+        alerts += [(f"🟢 Spot free again: {describe_event(e)}{warn(e)}", e) for e in freed]
+        for text, e in alerts:
+            self._send(text, everyone=True, buttons=[[("📌 I booked it", f"bk:e:{e.event_id}")]])
+        alerts = [text for text, _ in alerts]
+        self.alert_count += len(alerts)
         sent += alerts
 
         # Remember the current state; keep old entries of sources that failed.

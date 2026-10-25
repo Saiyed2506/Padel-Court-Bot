@@ -37,6 +37,7 @@ CLUB = Club("T1", "padel amigos", "Halstenbek", tuple(COURTS.values()), "https:/
 
 def settings(tmp: Path, extra: str = ""):
     text = (REPO / "config.toml").read_text(encoding="utf-8").replace('url = ""', f'url = "{CLUB.url}"')
+    text = text.replace("min_notice_hours = 48", "min_notice_hours = 0")  # tests use near-term slots
     path = tmp / "config.toml"
     path.write_text(text + extra, encoding="utf-8")
     return load_settings(path)
@@ -244,14 +245,15 @@ class FakeClient:
 class FakeNotifier:
     def __init__(self):
         self.sent: list[str] = []
+        self.outbox: list[dict] = []
         self.fail = False
 
-    def send(self, text, buttons=None, keyboard=None, chat_id=None):
+    def send(self, text, buttons=None, keyboard=None, chat_id=None, silent=False):
         if self.fail:
             raise NotifyError("offline")
         self.sent.append(text)
-        self.outbox = getattr(self, "outbox", [])
-        self.outbox.append({"text": text, "buttons": buttons, "keyboard": keyboard, "chat_id": chat_id})
+        self.outbox.append({"text": text, "buttons": buttons, "keyboard": keyboard, "chat_id": chat_id,
+                            "silent": silent})
         return len(self.outbox)
 
     def edit(self, message_id, text, buttons=None, chat_id=None):
@@ -973,7 +975,7 @@ class TelegramLoginTests(unittest.TestCase):
         self.assertFalse(self.watcher.events.account.logged_in)
 
 
-class MenuTests(unittest.TestCase):
+class MenuBase(unittest.TestCase):
     def setUp(self):
         from padel_bot.commands import CommandCenter
         from padel_bot.events import EventWords
@@ -1021,6 +1023,8 @@ class MenuTests(unittest.TestCase):
     def labels(self):
         return [label for row in self.last_screen()["buttons"] for label, _ in row]
 
+
+class MenuTests(MenuBase):
     def test_menu_command_and_button(self):
         self.cc.process([message(1, "/start")])
         self.assertEqual(self.telegram.outbox[0]["keyboard"], [["🎾 Menu"]])
@@ -1135,3 +1139,145 @@ class MenuTests(unittest.TestCase):
     def test_friends_screen_shows_invite_link(self):
         self.tap("fr")
         self.assertIn("https://t.me/padel_test_bot", self.last_screen()["text"])
+
+
+class NoticeTests(unittest.TestCase):
+    def test_48h_buffer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s = load_settings(REPO / "config.toml", require_club=False)
+            self.assertEqual((s.min_notice_min, s.free_cancel_min), (0, 24 * 60))  # default: alert for all
+            from dataclasses import replace as _replace
+            s = _replace(s, min_notice_min=48 * 60)
+            now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)                   # Monday 08:00
+            raw = [avail("c1", "2026-10-27", ("15:30:00", 90, "48 EUR")),   # Tue 16:30: 32.5h ahead
+                   avail("c1", "2026-10-28", ("15:30:00", 90, "48 EUR"))]   # Wed 16:30: 56.5h ahead
+            slots = parse_availability(raw, COURTS, TZ)
+            self.assertEqual([m.start.day for m in find_matches(slots, COURTS, s, now)], [28])
+
+
+class AlertExtrasTests(MenuBase):
+    """Who's in, I booked it, mute, <24h warning, daily check-in (reuses the menu set-up)."""
+
+    def setUp(self):
+        super().setUp()
+        from padel_bot.polls import Polls
+        from padel_bot.reminders import Reminders
+        tmp = Path(self.tmp.name)
+        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends)
+        self.watcher.reminders = Reminders(tmp / "reminders.json", self.bc, self.s.free_cancel_min)
+        self.telegram.chat_first_name = lambda chat_id: "Mo"
+        self.friends.pending["777"] = "Ali (@ali_p)"
+        self.friends.approve("777")
+
+    def court(self, day, utc_time, minutes=90):
+        self.client.replies[day] = [avail("c2", day, (utc_time, minutes, "45 EUR"))]
+
+    def alerts(self):
+        return [m for m in self.telegram.outbox if "Free court" in m["text"]]
+
+    def test_poll_alert_votes_and_silence(self):
+        self.court("2026-10-28", "15:30:00")                 # Wed 16:30 = preferred
+        self.court("2026-10-29", "17:00:00")                 # Thu 18:00 = not preferred
+        self.watcher.run_round()
+        alerts = self.alerts()
+        self.assertEqual([(a["chat_id"], a["silent"]) for a in alerts],
+                         [(None, False), ("777", False), (None, True), ("777", True)])  # only ⭐ rings
+        owner_buttons = [d for row in alerts[0]["buttons"] for _, d in row]
+        friend_buttons = [d for row in alerts[1]["buttons"] for _, d in row]
+        self.assertTrue(any(d.startswith("md:") for d in owner_buttons))
+        self.assertFalse(any(d.startswith("md:") for d in friend_buttons))   # friends can't mute
+        vote = [d for d in owner_buttons if d.startswith("p:in:")][0]
+        self.assertEqual(self.tap(vote), "You're in (1/4)")
+        self.assertEqual(self.tap(vote, chat_id=777), "You're in (2/4)")
+        self.assertEqual(self.tap(vote, chat_id=999), "Not allowed")
+        edited = self.telegram.edits[-2:]
+        self.assertTrue(all("👥 In (2/4): Mo, Ali" in e["text"] for e in edited))
+        self.assertEqual(self.tap(vote.replace("p:in", "p:out"), chat_id=777), "Noted - not this time")
+        self.assertIn("🙅 Not: Ali", self.telegram.edits[-1]["text"])
+
+    def test_many_new_slots_are_grouped(self):
+        for i, day in enumerate(["2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]):
+            self.client.replies[day] = [avail("c1", day, ("15:00:00", 90, "45 EUR")),
+                                        avail("c2", day, ("16:00:00", 90, "45 EUR"))]
+        self.watcher.run_round()
+        self.assertEqual(self.alerts(), [])
+        grouped = [m for m in self.telegram.outbox if "new free court slot(s)" in m["text"]]
+        self.assertEqual([m["chat_id"] for m in grouped], [None, "777"])
+
+    def test_under_24h_warning(self):
+        self.court("2026-10-26", "18:00:00")                 # today 19:00, 11h ahead
+        self.court("2026-10-28", "18:00:00")
+        self.watcher.run_round()
+        texts = [a["text"] for a in self.alerts() if a["chat_id"] is None]
+        self.assertIn("⚠️ <24h: no free cancellation", texts[0])
+        self.assertNotIn("⚠️", texts[1])
+
+    def test_mute_day_and_unmute(self):
+        self.assertIn("No more court alerts for Wed 28 Oct", self.tap("md:2026-10-28"))
+        self.court("2026-10-28", "15:30:00")
+        self.watcher.run_round()
+        self.assertEqual(self.alerts(), [])
+        self.tap("mw")
+        self.assertIn("🔕 Muted days: Wed 28 Oct", self.last_screen()["text"])
+        self.assertIn("back", self.tap("um:2026-10-28"))
+        self.watcher.run_round()
+        self.assertEqual(len(self.alerts()), 2)
+
+    def test_booked_it_reminder_48h_before(self):
+        self.court("2026-11-05", "16:00:00")                 # Thu 5 Nov 17:00
+        self.watcher.run_round()
+        booked = [d for row in self.alerts()[0]["buttons"] for _, d in row if d.startswith("bk:")][0]
+        toast = self.tap(booked)
+        self.assertIn("remind you Tue 3 Nov 17:00", toast)
+        self.assertEqual(self.tap(booked), "Already noted 📌")
+        self.assertIn("remind you", self.tap(booked, chat_id=777))   # a friend can note it too
+        self.tap("mw")
+        self.assertIn("📌 Thu 5 Nov 17:00-18:30, Indoor 2", self.last_screen()["text"].replace("Court 2", "Indoor 2"))
+        r = self.watcher.reminders
+        self.assertEqual(r.due(datetime(2026, 11, 3, 16, 0, tzinfo=TZ)), 0)
+        self.assertEqual(r.due(datetime(2026, 11, 3, 17, 1, tzinfo=TZ)), 2)
+        reminder = [m for m in self.telegram.outbox if m["text"].startswith("⏰")]
+        self.assertEqual([m["chat_id"] for m in reminder], ["42", "777"])
+        self.assertIn("Free cancellation ends Wed 4 Nov 17:00 (in about 23h)", reminder[0]["text"])
+        self.assertEqual(r.due(datetime(2026, 11, 3, 18, 0, tzinfo=TZ)), 0)   # once only
+        r.due(datetime(2026, 11, 5, 19, 0, tzinfo=TZ))
+        self.assertEqual(r.items, [])                                          # game over: dropped
+
+    def test_booked_late(self):
+        from padel_bot.reminders import Reminders
+        r = Reminders(Path(self.tmp.name) / "r2.json", self.bc, 24 * 60)
+        now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)
+        self.assertIn("free cancellation ends Mon 26 Oct 20:00",
+                      r.add("42", "a", "x", datetime(2026, 10, 27, 20, 0, tzinfo=TZ), now))   # 36h ahead
+        self.assertIn("already ended", r.add("42", "b", "y", datetime(2026, 10, 26, 20, 0, tzinfo=TZ), now))
+        self.assertEqual(r.due(now), 1)                       # the 36h one is reminded right away
+
+    def test_event_alert_has_booked_button(self):
+        from padel_bot.events import EventWatcher, EventWords
+        tmp = Path(self.tmp.name)
+        web, account = FakeWeb(), FakeAccount()
+        web.pages["academy/public-classes"] = ""
+        ew = EventWatcher(self.watcher.settings, web, account, CLUB, TZ, tmp / "ev.json",
+                          EventWords(tmp / "ew.json", ["Afterwork"]), self.bc, clock=lambda: self.now, sleep=lambda s: None)
+        self.watcher.events = ew
+        ew.check()
+        account.events = [{"tournament_id": "e7", "name": "Afterwork intermediate", "start_date": "2026-12-03T17:00:00",
+                           "available_places": 2}]
+        web.pages["e7"] = open_play_html("Afterwork intermediate", "Thu, Dec 3 · 6:00 PM", 2, 4)
+        ew.check()
+        alert = [m for m in self.telegram.outbox if m["text"].startswith("🆕") and m["chat_id"] is None][0]
+        self.assertEqual(alert["buttons"], [[("📌 I booked it", "bk:e:e7")]])
+        self.assertIn("remind you Tue 1 Dec 18:00", self.tap("bk:e:e7"))
+
+    def test_daily_report_once_a_day(self):
+        self.now = datetime(2026, 10, 27, 8, 5, tzinfo=TZ)
+        self.assertTrue(self.watcher.daily_report_due(self.now))
+        self.watcher._maybe_daily_report()
+        self.watcher._maybe_daily_report()
+        reports = [m for m in self.telegram.sent if m.startswith("☀️")]
+        self.assertEqual(len(reports), 1)
+        self.assertIn("court checks", reports[0])
+        late_start = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
+                             AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                             clock=lambda: datetime(2026, 10, 27, 9, 0, tzinfo=TZ))
+        self.assertFalse(late_start.daily_report_due(datetime(2026, 10, 27, 9, 0, tzinfo=TZ)))  # tomorrow

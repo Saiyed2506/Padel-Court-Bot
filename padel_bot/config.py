@@ -57,6 +57,9 @@ class Settings:
     quiet_hours: tuple[int, int] | None
     user_agent: str
     only_preferred: bool
+    min_notice_min: int             # only alert for games starting at least this far ahead
+    free_cancel_min: int            # club's free-cancellation limit before a game
+    daily_report_min: int | None    # time of the daily check-in message; None = off
     telegram_commands: bool
     events_enabled: bool
     event_words: tuple[str, ...]
@@ -197,6 +200,12 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         # Deliberate floor: polling faster than this is how bots get blocked.
         raise ConfigError("polling intervals must be at least 2 minutes")
 
+    report = str(notify.get("daily_report", "08:00")).strip().lower()
+    try:
+        daily_report_min = None if report in ("", "off", "none") else parse_hhmm(report)
+    except ValueError:
+        raise ConfigError('notify.daily_report must look like "08:00" or "off"') from None
+
     events = data.get("events", {})
     events_minutes = float(events.get("check_every_minutes", 30))
     if events_minutes < 15:
@@ -235,6 +244,9 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         quiet_hours=quiet_hours,
         user_agent=str(polling.get("user_agent", "padel-court-bot/1.0 (personal availability watcher)")),
         only_preferred=bool(notify.get("only_preferred", False)),
+        min_notice_min=int(float(watch.get("min_notice_hours", 0)) * 60),
+        free_cancel_min=int(float(watch.get("free_cancellation_hours", 24)) * 60),
+        daily_report_min=daily_report_min,
         telegram_commands=bool(notify.get("telegram_commands", True)),
         events_enabled=bool(events.get("enabled", True)),
         event_words=tuple(str(w) for w in events.get("watch", [])),

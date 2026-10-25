@@ -101,7 +101,7 @@ def matching_window(slot: Slot, windows: tuple[Window, ...]) -> Window | None:
 
 def find_matches(slots: list[Slot], courts: dict[str, Court], settings: Settings,
                  now: datetime, target_day=None) -> list[Slot]:
-    """Slots on wanted courts, inside a window, not already started.
+    """Slots on wanted courts, inside a window, far enough ahead (min_notice).
 
     Sorted by day; within a day preferred start times come first.
     """
@@ -111,6 +111,8 @@ def find_matches(slots: list[Slot], courts: dict[str, Court], settings: Settings
             continue  # the UTC query range can spill into neighbouring days
         if slot.start <= now or not court_is_wanted(courts.get(slot.resource_id), settings):
             continue
+        if (slot.start - now).total_seconds() < settings.min_notice_min * 60:
+            continue  # too soon to cancel for free if plans change (club: 24h rule)
         window = matching_window(slot, settings.windows)
         if window is None:
             continue

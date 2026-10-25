@@ -78,8 +78,14 @@ class RuntimeSettings:
         if "quiet_hours" in data:
             q = data["quiet_hours"]
             changes["quiet_hours"] = (parse_hhmm(q[0]), parse_hhmm(q[1])) if q else None
+        if "min_notice_hours" in data:
+            changes["min_notice_min"] = int(data["min_notice_hours"]) * 60
+        if "daily_report" in data:
+            changes["daily_report_min"] = parse_hhmm(data["daily_report"]) if data["daily_report"] else None
         if changes:
             watcher.settings = replace(watcher.settings, **changes)
+        today = watcher.clock().date()
+        watcher.muted_days = {d for d in (date.fromisoformat(x) for x in data.get("muted_days", [])) if d >= today}
 
 
 class Menu:
@@ -135,6 +141,8 @@ class Menu:
             "fx": self._friend_remove,
             "st": self._go_settings, "sp": self._toggle_pause, "so": self._toggle_only_preferred,
             "sq": self._cycle_quiet, "sl": self._login, "slo": self._logout,
+            "sb": self._cycle_buffer, "sr": self._toggle_report,
+            "md": self._mute_day, "um": self._unmute_day, "rb": self._remove_booking,
         }.get(key)
         if handler is None:
             return "This button is from an older version - tap 🎾 Menu."
@@ -281,7 +289,25 @@ class Menu:
         lines = [f"{i}. {describe(w)}" for i, w in enumerate(windows, 1)] or ["(no court wishes)"]
         words = self.watcher.events.words.load() if self.watcher.events else []
         events = [f"E{i}. {w}" for i, w in enumerate(words, 1)] or ["(no event names)"]
-        return "📋 Court wishes:\n" + "\n".join(lines) + "\n\n🎫 Events:\n" + "\n".join(events)
+        muted = ", ".join(format_day(datetime(d.year, d.month, d.day)) for d in sorted(self.watcher.muted_days))
+        booked = [f"📌 {i['label']}" + (" (reminder sent)" if i["sent"] else "") for i in self._bookings()]
+        return ("📋 Court wishes:\n" + "\n".join(lines) + "\n\n🎫 Events:\n" + "\n".join(events)
+                + (f"\n\n🔕 Muted days: {muted}" if muted else "")
+                + ("\n\n📌 Booked (reminder 48h before):\n" + "\n".join(booked) if booked else ""))
+
+    def _bookings(self) -> list[dict]:
+        reminders = self.watcher.reminders
+        return reminders.for_chat(str(self.notifier.chat_id)) if reminders is not None else []
+
+    def _remove_booking(self, arg, mid):
+        index, _, check = arg.partition(":")
+        mine = self._bookings()
+        if not index.isdigit() or int(index) >= len(mine) or _short_hash(mine[int(index)]["key"]) != check:
+            self._go_wishes("", mid)
+            return "That list was outdated - here's the current one"
+        removed = self.watcher.reminders.remove(str(self.notifier.chat_id), int(index))
+        self._go_wishes("", mid)
+        return f"Removed {removed['label'][:100]}" if removed else "Already removed"
 
     def _wish_buttons(self):
         rows = []
@@ -290,6 +316,11 @@ class Menu:
         words = self.watcher.events.words.load() if self.watcher.events else []
         for i, w in enumerate(words):
             rows.append([(f"🗑 E{i + 1}. {w[:40]}", f"de:{i}:{_short_hash(w)}")])
+        for day in sorted(self.watcher.muted_days):
+            label = format_day(datetime(day.year, day.month, day.day))
+            rows.append([(f"🔔 Unmute {label}", f"um:{day.isoformat()}")])
+        for i, item in enumerate(self._bookings()):
+            rows.append([(f"🗑 📌 {item['label'][:40]}", f"rb:{i}:{_short_hash(item['key'])}")])
         rows.append([("➕ Court wish", "cw"), ("📅 One-time", "ow")])
         rows.append(BACK)
         return rows
@@ -412,10 +443,14 @@ class Menu:
         quiet = w.settings.quiet_hours
         quiet_text = f"{hhmm(quiet[0])}-{hhmm(quiet[1])}" if quiet else "off"
         account = w.events.account if w.events else None
+        notice = w.settings.min_notice_min // 60
+        report = w.settings.daily_report_min
         rows = [
             [("▶️ Resume alerts" if w.paused else "⏸ Pause alerts", "sp")],
             [(f"⭐ Only favourite times: {'ON' if w.settings.only_preferred else 'off'}", "so")],
+            [(f"⏱ Only games ≥{notice}h ahead" if notice else "⏱ All games, also last-minute", "sb")],
             [(f"🌙 Night pause: {quiet_text}", "sq")],
+            [(f"☀️ Daily check-in: {hhmm(report) if report is not None else 'off'}", "sr")],
         ]
         if account is not None:
             rows.append([("🔐 Playtomic: log out", "slo")] if account.logged_in
@@ -449,6 +484,43 @@ class Menu:
         self.watcher.request_check()
         self._go_settings("", mid)
         return f"Night pause {choice[0]}-{choice[1]}" if choice else "Night pause off - checks around the clock"
+
+    def _cycle_buffer(self, arg, mid):
+        choices = [0, 24, 48]
+        current = self.watcher.settings.min_notice_min // 60
+        hours = choices[(choices.index(current) + 1) % len(choices)] if current in choices else 48
+        self.watcher.settings = replace(self.watcher.settings, min_notice_min=hours * 60)
+        self.runtime.update(min_notice_hours=hours)
+        self.watcher.set_windows(self.watcher.settings.windows)  # re-check all days with the new rule
+        self._go_settings("", mid)
+        return (f"Alerts only for games ≥{hours}h ahead" if hours
+                else "All games, also last-minute (marked ⚠️ when under 24h)")
+
+    def _toggle_report(self, arg, mid):
+        on = self.watcher.settings.daily_report_min is None
+        self.watcher.settings = replace(self.watcher.settings, daily_report_min=8 * 60 if on else None)
+        self.runtime.update(daily_report="08:00" if on else None)
+        self._go_settings("", mid)
+        return "Daily check-in at 08:00" if on else "Daily check-in off"
+
+    def _mute_day(self, arg, mid):
+        try:
+            day = date.fromisoformat(arg)
+        except ValueError:
+            return "Unknown day"
+        self.watcher.muted_days.add(day)
+        self.runtime.update(muted_days=sorted(d.isoformat() for d in self.watcher.muted_days))
+        return f"🔕 No more court alerts for {format_day(datetime(day.year, day.month, day.day))} (undo in 📋 My wishes)"
+
+    def _unmute_day(self, arg, mid):
+        try:
+            self.watcher.muted_days.discard(date.fromisoformat(arg))
+        except ValueError:
+            return "Unknown day"
+        self.runtime.update(muted_days=sorted(d.isoformat() for d in self.watcher.muted_days))
+        self.watcher.set_windows(self.watcher.settings.windows)  # re-check: alerts for that day come back
+        self._go_wishes("", mid)
+        return "🔔 Alerts for that day are back"
 
     def _login(self, arg, mid):
         self.notifier.send(self.center.handle("/login"))
