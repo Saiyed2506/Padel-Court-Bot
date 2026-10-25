@@ -55,6 +55,7 @@ class Settings:
     quiet_hours: tuple[int, int] | None
     user_agent: str
     only_preferred: bool
+    telegram_commands: bool
     alert_after_failed_rounds: int
     state_file: Path
     club_file: Path               # cached club ID and courts
@@ -158,6 +159,11 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
     notify = data.get("notify", {})
 
     club_url = str(club.get("url", "")).strip()
+    if not club_url:
+        # Set up earlier but config.toml was replaced (e.g. by an update): reuse club.json.
+        from .playtomic import load_club
+        cached = load_club(config_path.parent / "club.json")
+        club_url = cached.url if cached else ""
     if require_club and not club_url:
         raise ConfigError(
             "club.url is empty in config.toml. Double-click START-HERE.bat, or run "
@@ -205,6 +211,7 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         quiet_hours=quiet_hours,
         user_agent=str(polling.get("user_agent", "padel-court-bot/1.0 (personal availability watcher)")),
         only_preferred=bool(notify.get("only_preferred", False)),
+        telegram_commands=bool(notify.get("telegram_commands", True)),
         alert_after_failed_rounds=int(notify.get("alert_after_failed_rounds", 6)),
         state_file=config_path.parent / str(data.get("state_file", "state.json")),
         club_file=config_path.parent / "club.json",

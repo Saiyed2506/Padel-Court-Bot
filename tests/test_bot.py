@@ -487,3 +487,155 @@ class SetupWizardTests(unittest.TestCase):
              mock.patch("builtins.input", lambda prompt="": ""), mock.patch("builtins.print"):
             notifier = setup_wizard.setup_telegram(Path("unused.env"))
         self.assertEqual(notifier.chat_id, "42")
+
+
+class WishTests(unittest.TestCase):
+    def test_parse_days(self):
+        from padel_bot.wishes import parse_days
+        self.assertEqual(parse_days("weekdays"), frozenset(["mon", "tue", "wed", "thu", "fri"]))
+        self.assertEqual(parse_days("sat,sun"), frozenset(["sat", "sun"]))
+        self.assertEqual(parse_days("fri-mon"), frozenset(["fri", "sat", "sun", "mon"]))
+        self.assertEqual(parse_days("Di"), frozenset(["tue"]))  # German
+        self.assertEqual(parse_days("tuesday"), frozenset(["tue"]))
+
+    def test_parse_wish(self):
+        from padel_bot.wishes import WishError, describe, parse_wish
+        exact = parse_wish("tue 17:00")
+        self.assertEqual((exact.start_min, exact.end_min, exact.durations), (17 * 60, 18 * 60 + 30, frozenset({90})))
+        self.assertEqual(exact.preferred_starts, frozenset({17 * 60}))
+        self.assertEqual(describe(exact), "Tue 17:00-18:30, 90 min")
+        ranged = parse_wish("mon-fri 16:00-20:30 prefer 16:30,17:00")
+        self.assertEqual(describe(ranged), "Mon-Fri 16:00-20:30 (starts 16:00-19:00), 90 min, ⭐ 16:30 17:00")
+        self.assertEqual(parse_wish("sat 10:00 120").durations, frozenset({120}))
+        for bad in ("tue", "xyz 17:00", "tue 25:00", "tue 17:00-17:30", "tue 17:00 abc",
+                    "mon 16:00-18:00 prefer 17:30", "sun 23:30"):
+            with self.assertRaises(WishError, msg=bad):
+                parse_wish(bad)
+
+    def test_wish_store_round_trip(self):
+        from padel_bot.wishes import WishStore, parse_wish
+        with tempfile.TemporaryDirectory() as tmp:
+            defaults = (parse_wish("weekend 09:30-12:30"),)
+            store = WishStore(Path(tmp) / "wishes.json", defaults)
+            self.assertEqual(store.load(), defaults)
+            mine = (parse_wish("tue 17:00"), parse_wish("mon-fri 16:00-20:30 prefer 16:30"))
+            store.save(mine)
+            self.assertEqual(WishStore(Path(tmp) / "wishes.json", defaults).load(), mine)
+            self.assertEqual(store.reset(), defaults)
+            self.assertEqual(store.load(), defaults)
+
+    def test_shipped_config_as_wishes(self):
+        from padel_bot.wishes import describe
+        s = load_settings(REPO / "config.toml", require_club=False)
+        self.assertEqual([describe(w) for w in s.windows],
+                         ["Mon-Fri 16:00-20:30 (starts 16:00-19:00), 90 min, ⭐ 16:30 17:00",
+                          "Sat-Sun 09:30-12:30 (starts 09:30-11:00), 90 min"])
+
+
+class FakeTelegram(FakeNotifier):
+    chat_id = "42"
+
+    def __init__(self, batches=()):
+        super().__init__()
+        self.batches = list(batches)
+        self.offsets = []
+
+    def get_updates(self, offset, timeout=25):
+        self.offsets.append(offset)
+        return self.batches.pop(0) if self.batches else []
+
+
+def message(update_id, text, chat_id=42):
+    return {"update_id": update_id, "message": {"chat": {"id": chat_id}, "text": text}}
+
+
+class CommandTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.commands import CommandCenter
+        from padel_bot.wishes import WishStore
+        self.tmp = tempfile.TemporaryDirectory()
+        self.s = settings(Path(self.tmp.name))
+        self.now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)
+        self.client = FakeClient()
+        self.telegram = FakeTelegram()
+        self.watcher = Watcher(self.s, self.client, CLUB, self.telegram, SeenState(self.s.state_file), TZ,
+                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               clock=lambda: self.now, sleep=lambda s: None)
+        self.store = WishStore(Path(self.tmp.name) / "wishes.json", self.s.windows)
+        self.cc = CommandCenter(self.watcher, self.telegram, self.store, sleep=lambda s: None)
+        self.watcher.commands = self.cc
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_add_and_remove_wish(self):
+        reply = self.cc.handle("/wish tue 17:00")
+        self.assertIn("Added: Tue 17:00-18:30", reply)
+        self.assertEqual(len(self.watcher.settings.windows), 3)
+        self.assertTrue(self.watcher.check_requested)
+        self.assertTrue((Path(self.tmp.name) / "wishes.json").exists())
+        self.assertIn("3. Tue 17:00-18:30", self.cc.handle("/wishes"))
+        self.assertIn("Removed: Sat-Sun", self.cc.handle("/remove 2"))
+        self.assertEqual(len(self.store.load()), 2)
+        self.assertIn("Which one?", self.cc.handle("/remove 9"))
+        self.assertIn("🤔", self.cc.handle("/wish someday 17:00"))
+        self.assertIn("Back to the wishes", self.cc.handle("/reset"))
+        self.assertEqual(len(self.watcher.settings.windows), 2)
+
+    def test_new_wish_finds_slots(self):
+        # 19:30 local on a Monday is outside the default wishes...
+        self.client.replies["2026-10-26"] = [avail("c1", "2026-10-26", ("18:30:00", 90, "48 EUR"))]
+        self.assertEqual(self.watcher.run_round(), [])
+        # ...until you wish for it.
+        self.cc.handle("/wish mon 19:30")
+        self.assertEqual(len(self.watcher.run_round()), 1)
+        self.assertIn("19:30-21:00", self.cc.handle("/now"))
+
+    def test_pause_resume_status(self):
+        self.assertIn("Paused", self.cc.handle("/pause"))
+        self.assertTrue(self.watcher.paused)
+        self.assertIn("paused", self.cc.handle("/status"))
+        self.assertIn("Resumed", self.cc.handle("/resume"))
+        self.assertFalse(self.watcher.paused)
+        self.assertIn("running", self.cc.handle("/status"))
+        self.assertIn("/help", self.cc.handle("hello"))
+        self.assertIn("/wish", self.cc.handle("/help"))
+        self.assertIn("I'm watching", self.cc.handle("/wishes@padel_bot"))
+
+    def test_only_own_chat_is_obeyed(self):
+        self.cc.process([message(5, "/pause", chat_id=666), message(6, "/wishes")])
+        self.assertFalse(self.watcher.paused)
+        self.assertEqual(len(self.telegram.sent), 1)          # only our chat got an answer
+        self.assertIn("I'm watching", self.telegram.sent[0])
+        self.assertEqual(self.cc.offset, 7)
+
+    def test_listen_returns_early_after_new_wish(self):
+        clock = [0.0]
+        self.cc.monotonic = lambda: clock[0]
+        self.telegram.batches = [[], [message(1, "/wish sat 10:00")], []]
+        def advance(*a, **k):
+            clock[0] += 25
+            return FakeTelegram.get_updates(self.telegram, *a, **k)
+        self.telegram.get_updates = advance
+        self.cc.listen(300)
+        self.assertEqual(clock[0], 50)                       # stopped after the wish, not at 300 s
+        self.assertEqual(self.telegram.offsets, [None, None])
+
+
+class ExploreTests(unittest.TestCase):
+    def test_find_events_in_json_and_html(self):
+        import json as _json
+        from padel_bot.explore import find_events
+        event = {"tournament_id": "e1", "name": "Newcomer Club mit Coach David",
+                 "start_date": "2026-10-31T10:30:00", "available_places": 2}
+        self.assertEqual(find_events(_json.dumps({"content": [event]})), [event])
+        flight = _json.dumps({"tournament": event})
+        html = '<script>self.__next_f.push([1,' + _json.dumps(flight) + '])</script>'
+        self.assertEqual(find_events(html), [event])
+        self.assertEqual(find_events("<html>nothing</html>"), [])
+
+    def test_candidates_include_event_id(self):
+        from padel_bot.explore import candidates
+        urls = dict(candidates(CLUB, "https://app.playtomic.com/tournaments/30edfbd8-8f5f-4b74-8075-500e4caa7c78?utm=x"))
+        self.assertIn("30edfbd8-8f5f-4b74-8075-500e4caa7c78", urls["app api: this event"])
+        self.assertIn("tenant_id=T1", urls["website api: club tournaments"])

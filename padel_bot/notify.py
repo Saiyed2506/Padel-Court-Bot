@@ -61,11 +61,11 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.timeout_s = timeout_s
 
-    def _call(self, method: str, params: dict) -> dict:
+    def _call(self, method: str, params: dict, timeout_s: float | None = None) -> dict:
         url = f"https://api.telegram.org/bot{self._token}/{method}"
         body = urllib.parse.urlencode(params).encode("utf-8")
         try:
-            with urllib.request.urlopen(url, data=body, timeout=self.timeout_s) as response:
+            with urllib.request.urlopen(url, data=body, timeout=timeout_s or self.timeout_s) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             # Never include the URL in the message: it contains your bot token.
@@ -83,6 +83,17 @@ class TelegramNotifier:
             "text": text[:TELEGRAM_LIMIT],
             "disable_web_page_preview": "true",
         })
+
+    def get_updates(self, offset: int | None, timeout: int = 25) -> list[dict]:
+        """New messages to the bot, waiting up to `timeout` s for one (long polling)."""
+        params = {"timeout": str(timeout), "allowed_updates": '["message"]'}
+        if offset is not None:
+            params["offset"] = str(offset)
+        return self._call("getUpdates", params, timeout_s=timeout + 15).get("result", [])
+
+    def set_commands(self, commands: list[tuple[str, str]]) -> None:
+        menu = [{"command": c, "description": d} for c, d in commands]
+        self._call("setMyCommands", {"commands": json.dumps(menu)})
 
     def bot_username(self) -> str:
         """Checks the token works; returns the bot's @username."""

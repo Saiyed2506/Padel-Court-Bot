@@ -167,6 +167,34 @@ told again.
 
 ---
 
+## Telling the bot your wishes (Telegram commands)
+
+While `run-bot.bat` is running, send these to your bot in Telegram (or tap the
+**/** menu button). Only your own chat is obeyed.
+
+| Command | What it does |
+|---|---|
+| `/wishes` | Show what's being watched, numbered |
+| `/wish tue 17:00` | Watch exactly 17:00-18:30 on Tuesdays (starred) |
+| `/wish weekend 09:30-12:30` | Any 90-min game inside that window on Sat/Sun |
+| `/wish mon-fri 16:00-20:30 prefer 16:30,17:00` | Window with starred favourite times |
+| `/wish sat 10:00 120` | A 120-minute game |
+| `/remove 2` | Delete wish number 2 |
+| `/reset` | Back to the wishes in `config.toml` |
+| `/now` | Free slots matching your wishes right now |
+| `/status` | Is the bot running, when was the last check |
+| `/pause`, `/resume` | Stop / restart alerts |
+
+Days can be `mon`..`sun` (or German `mo`, `di`, ...), `mon-fri`, `sat,sun`,
+`weekdays` or `weekend`. Wishes are saved in `wishes.json`, so they survive a
+restart. After the first change they replace the windows in `config.toml`.
+
+## Updating the bot
+
+Close the bot window, double-click **`update.bat`**, then start `run-bot.bat`
+again. It replaces only the program files. Your `.env`, `config.toml`, club
+and wishes stay as they are.
+
 ## Keeping it running on a laptop
 
 - The bot only works while the laptop is **on and awake**. Closed lid or sleep

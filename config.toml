@@ -52,6 +52,7 @@ user_agent = "padel-court-bot/1.0 (personal availability watcher)"
 [notify]
 only_preferred = false        # true = only alert for 16:30 / 17:00 on weekdays
 alert_after_failed_rounds = 6 # warn you on Telegram if checks keep failing
+telegram_commands = true      # change wishes from Telegram: send /help to the bot
 
 [auto_book]
 # Not implemented yet. Even when enabled, only dry-run (log only) is allowed.

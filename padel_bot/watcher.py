@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Callable
 
@@ -59,6 +60,53 @@ class Watcher:
         self.failed_rounds = 0
         self.failure_alert_sent = False
         self.backoff_s = 0.0
+        self.paused = False
+        self.check_requested = False
+        self.last_round_at: datetime | None = None
+        self.last_error: str | None = None
+        self.started_at = self.clock()
+        self.rounds = 0
+        self.matches_by_day: dict[date, list[Slot]] = {}
+        self.commands = None  # a CommandCenter, when Telegram commands are on
+
+    # --- controls used by Telegram commands ----------------------------
+
+    def set_windows(self, windows: tuple) -> None:
+        self.settings = replace(self.settings, windows=tuple(windows))
+        self.last_fetch.clear()   # re-check every day with the new wishes
+        self.matches_by_day.clear()
+        self.request_check()
+
+    def request_check(self) -> None:
+        self.check_requested = True
+
+    def current_matches(self) -> list[Slot]:
+        now = self.clock()
+        return [s for day in sorted(self.matches_by_day) for s in self.matches_by_day[day] if s.start > now]
+
+    def status_text(self) -> str:
+        now = self.clock()
+        state = "⏸ paused" if self.paused else "▶️ running"
+        if in_quiet_hours(now, self.settings.quiet_hours) and not self.paused:
+            state += " (quiet hours, no checks until " + f"{self.settings.quiet_hours[1] // 60:02d}:{self.settings.quiet_hours[1] % 60:02d})"
+        last = self.last_round_at.strftime("%a %H:%M") if self.last_round_at else "not yet"
+        lines = [
+            f"Padel bot: {state}",
+            f"Running since {self.started_at.strftime('%a %d %b %H:%M')}, {self.rounds} check round(s)",
+            f"Last check: {last}",
+            f"Wishes: {len(self.settings.windows)} (see /wishes)",
+            f"Free matching slots right now: {len(self.current_matches())} (see /now)",
+        ]
+        if self.failed_rounds:
+            lines.append(f"⚠️ Last {self.failed_rounds} round(s) had errors: {self.last_error}")
+        return "\n".join(lines)
+
+    def wait(self, seconds: float) -> None:
+        """Sleep, but keep answering Telegram commands if they're on."""
+        if self.commands is None:
+            self.sleep(seconds)
+        else:
+            self.commands.listen(seconds)
 
     # --- scheduling ----------------------------------------------------
 
@@ -88,6 +136,7 @@ class Watcher:
     def run_round(self) -> list[Slot]:
         """Check all due days once. Returns the newly found slots."""
         now = self.clock()
+        self.check_requested = False
         due = self.days_due(now)
         new_by_day: dict[date, list[Slot]] = {}
         errors: list[PlaytomicError] = []
@@ -104,6 +153,7 @@ class Watcher:
                     break  # asked to slow down: stop this round immediately
                 continue
             self.last_fetch[day] = now
+            self.matches_by_day[day] = matches
             new_keys = self.state.update_day(day, {m.key for m in matches})
             new = [m for m in matches if m.key in new_keys]
             if new:
@@ -111,6 +161,9 @@ class Watcher:
 
         self.state.forget_before(now.date())
         self.last_fetch = {d: t for d, t in self.last_fetch.items() if d >= now.date()}
+        self.matches_by_day = {d: m for d, m in self.matches_by_day.items() if d >= now.date()}
+        self.last_round_at = now
+        self.rounds += 1
         new_slots = [s for day in sorted(new_by_day) for s in new_by_day[day]]
         if new_slots:
             self._announce(new_slots, new_by_day)
@@ -147,6 +200,7 @@ class Watcher:
             self.failed_rounds = 0
             return
         self.failed_rounds += 1
+        self.last_error = str(errors[-1])
         self.backoff_s = min(max(self.backoff_s * 2, self.settings.near_interval_s), MAX_BACKOFF_S)
         if self.failed_rounds >= self.settings.alert_after_failed_rounds and not self.failure_alert_sent:
             self._safe_send(
@@ -171,10 +225,15 @@ class Watcher:
     def run_forever(self) -> None:
         while True:
             now = self.clock()
+            if self.paused or not self.settings.windows:
+                self.check_requested = False
+                self.wait(300)  # nothing to check; still answer commands
+                continue
             if in_quiet_hours(now, self.settings.quiet_hours):
                 wait = seconds_until_quiet_end(now, self.settings.quiet_hours)
                 log.info("Quiet hours - sleeping %.0f minutes", wait / 60)
-                self.sleep(wait + self.rng.uniform(0, 120))
+                self.check_requested = False
+                self.wait(min(wait + self.rng.uniform(0, 120), 1800))  # re-evaluate at least every 30 min
                 continue
             try:
                 self.run_round()
@@ -183,4 +242,4 @@ class Watcher:
                 self.backoff_s = min(max(self.backoff_s * 2, self.settings.near_interval_s), MAX_BACKOFF_S)
             wait = self.next_sleep_s()
             log.info("Next check in %.1f minutes", wait / 60)
-            self.sleep(wait)
+            self.wait(wait)

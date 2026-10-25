@@ -12,3 +12,6 @@ __pycache__/
 .venv/
 venv/
 club.json
+wishes.json
+wishes.json.tmp
+explore_report.txt

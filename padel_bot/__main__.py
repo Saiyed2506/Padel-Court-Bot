@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import logging
 import random
 import sys
@@ -17,7 +18,9 @@ from .playtomic import Club, PlaytomicClient, PlaytomicError, load_or_fetch_club
 from .rules import court_is_wanted, find_matches, parse_availability
 from .state import SeenState
 from .timeutil import club_timezone, format_day, format_time
+from .commands import CommandCenter
 from .watcher import Watcher
+from .wishes import WishStore
 
 log = logging.getLogger("padel_bot")
 
@@ -53,8 +56,13 @@ def cmd_set_club(args, settings: Settings) -> int:
     return 0
 
 
+def wish_store(settings: Settings) -> WishStore:
+    return WishStore(settings.state_file.parent / "wishes.json", settings.windows)
+
+
 def cmd_check(args, settings: Settings) -> int:
     """One pass over all days, printed to the screen. Sends nothing, saves nothing."""
+    settings = replace(settings, windows=wish_store(settings).load())
     tz = club_timezone()
     client = PlaytomicClient(settings.user_agent)
     club = get_club(settings)
@@ -119,6 +127,14 @@ def cmd_setup(args, settings: Settings) -> int:
     return run_setup(args.config, run_check)
 
 
+def cmd_explore_events(args, settings: Settings) -> int:
+    from .explore import run
+
+    run(get_club(settings), args.event_url, settings.user_agent,
+        settings.state_file.parent / "explore_report.txt")
+    return 0
+
+
 def cmd_run(args, settings: Settings) -> int:
     tz = club_timezone()
     notifier = telegram_from_env()
@@ -131,8 +147,18 @@ def cmd_run(args, settings: Settings) -> int:
     if not wanted:
         raise ConfigError("No courts match [courts] in config.toml; nothing to watch.")
     log.info("Club: %s - watching %d court(s): %s", club.name, len(wanted), ", ".join(wanted))
+    store = wish_store(settings)
+    settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
                       SeenState(settings.state_file), tz, booker)
+    if settings.telegram_commands:
+        watcher.commands = CommandCenter(watcher, notifier, store)
+        watcher.commands.register_menu()
+    try:
+        notifier.send("✅ Padel bot started.\n\n" + (watcher.commands.wishes_text() if watcher.commands else "")
+                      + ("\n\nSend /help to see what you can tell me." if watcher.commands else ""))
+    except NotifyError as exc:
+        log.error("Could not send the start message: %s", exc)
     log.info("Watching days 0-%d. Press Ctrl+C to stop.", settings.days_ahead)
     watcher.run_forever()
     return 0
@@ -166,6 +192,10 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("telegram-chat-id", help="show your Telegram chat ID (setup helper)")
     p.set_defaults(func=cmd_telegram_chat_id, needs_club=False)
+
+    p = sub.add_parser("explore-events", help="one-off: find where Playtomic serves event data")
+    p.add_argument("event_url", nargs="?", help="a shared event link (optional)")
+    p.set_defaults(func=cmd_explore_events, needs_club=True)
 
     p = sub.add_parser("run", help="start watching (Ctrl+C to stop)")
     p.set_defaults(func=cmd_run, needs_club=True)
