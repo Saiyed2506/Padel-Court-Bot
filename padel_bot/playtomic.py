@@ -84,22 +84,85 @@ def _parse_court(raw: dict) -> Court | None:
     )
 
 
-def parse_club_page(html: str, url: str) -> Club:
-    """Read club ID and courts from the JSON a Next.js page embeds for itself."""
+_FLIGHT_CHUNK = re.compile(r'self\.__next_f\.push\(\[\d+\s*,\s*("(?:[^"\\]|\\.)*")\s*\]\)')
+_TENANT_KEY = re.compile(r'"(?:tenant_id|tenantId)"\s*:')
+
+
+def _page_texts(html: str) -> list[str]:
+    """The places a Next.js page can hide its data, most structured first.
+
+    Older pages embed one JSON blob (__NEXT_DATA__); newer "app router" pages
+    stream it as JavaScript strings (self.__next_f.push([1, "..."])), which we
+    decode back into text.
+    """
+    texts = []
     match = _NEXT_DATA.search(html)
-    if not match:
-        raise PlaytomicError("club page has no embedded data (did Playtomic change its website?)",
+    if match:
+        texts.append(match.group(1))
+    chunks = []
+    for literal in _FLIGHT_CHUNK.findall(html):
+        try:
+            chunks.append(json.loads(literal))
+        except json.JSONDecodeError:
+            continue
+    if chunks:
+        texts.append("".join(chunks))
+    texts.append(html)
+    return texts
+
+
+def _enclosing_objects(text: str, key_pos: int, max_tries: int = 40):
+    """JSON objects that start before key_pos and contain it, innermost first."""
+    decoder = json.JSONDecoder()
+    pos, tries = key_pos, 0
+    while tries < max_tries:
+        pos = text.rfind("{", 0, pos)
+        if pos < 0:
+            return
+        tries += 1
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            continue
+        if end > key_pos and isinstance(obj, dict):
+            yield obj
+
+
+def _find_tenant(text: str) -> dict | None:
+    """The first JSON object with a tenant ID and a list of courts."""
+    for match in _TENANT_KEY.finditer(text):
+        for obj in _enclosing_objects(text, match.start()):
+            if (obj.get("tenant_id") or obj.get("tenantId")) and isinstance(obj.get("resources"), list):
+                return obj
+    return None
+
+
+def describe_page(html: str) -> str:
+    """One line about a page we couldn't read, to help diagnose remotely."""
+    title = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
+    return (f"page size {len(html)} chars, title {title.group(1).strip()[:60] if title else '-'!r}, "
+            f"next_data={'yes' if _NEXT_DATA.search(html) else 'no'}, "
+            f"flight_chunks={len(_FLIGHT_CHUNK.findall(html))}, "
+            f"mentions_tenant={'yes' if 'tenant' in html else 'no'}, "
+            f"mentions_resources={'yes' if 'resource' in html else 'no'}")
+
+
+def parse_club_page(html: str, url: str) -> Club:
+    """Read club ID and courts from the data a Next.js page embeds for itself."""
+    tenant = None
+    for text in _page_texts(html):
+        tenant = _find_tenant(text)
+        if tenant:
+            break
+    if tenant is None:
+        raise PlaytomicError(f"could not find the club data in the page ({describe_page(html)})",
                              retryable=False)
-    try:
-        tenant = json.loads(match.group(1))["props"]["pageProps"]["tenant"]
-    except (json.JSONDecodeError, KeyError, TypeError):
-        raise PlaytomicError("club page data has an unexpected format", retryable=False) from None
     addr = tenant.get("address") or {}
-    address = ", ".join(p for p in (addr.get("street"), addr.get("postal_code"), addr.get("city")) if p)
-    courts = tuple(c for c in (_parse_court(r) for r in tenant.get("resources") or []) if c)
+    address = ", ".join(str(p) for p in (addr.get("street"), addr.get("postal_code"), addr.get("city")) if p)
+    courts = tuple(c for c in (_parse_court(r) for r in tenant["resources"] if isinstance(r, dict)) if c)
     return Club(
-        tenant_id=str(tenant.get("tenant_id", "")),
-        name=str(tenant.get("tenant_name", "")),
+        tenant_id=str(tenant.get("tenant_id") or tenant.get("tenantId")),
+        name=str(tenant.get("tenant_name") or tenant.get("tenantName") or tenant.get("name") or ""),
         address=address,
         courts=courts,
         url=url,

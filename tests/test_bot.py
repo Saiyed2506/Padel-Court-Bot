@@ -354,6 +354,25 @@ class ParseClubTests(unittest.TestCase):
                                        Court("r5", "Court 5", False, "double"),
                                        Court("r9", "Single", True, "single")))
 
+    def test_parse_app_router_page(self):
+        # Newer Next.js pages stream their data as escaped JavaScript strings.
+        import json as _json
+        tenant = {"slug": "padel-amigos", "address": {"city": "Halstenbek"}, "tenant_id": "t2",
+                  "tenant_name": "padel amigos", "resources": [
+                      {"properties": {"resource_type": "indoor", "resource_size": "double"},
+                       "resource_id": "r1", "name": "Court 1", "sport_id": "PADEL"}]}
+        flight = '5:["$","div",null,{"children":' + _json.dumps({"tenant": tenant}) + '}]\n'
+        half = len(flight) // 2
+        html = ("<html><body><script>self.__next_f.push([1," + _json.dumps(flight[:half]) + "])</script>"
+                "<script>self.__next_f.push([1," + _json.dumps(flight[half:]) + "])</script></body></html>")
+        club = parse_club_page(html, "u")
+        self.assertEqual(club.tenant_id, "t2")
+        self.assertEqual(club.courts, (Court("r1", "Court 1", True, "double"),))
+
+    def test_failure_describes_page(self):
+        with self.assertRaisesRegex(PlaytomicError, "title 'Padel Amigos'.*flight_chunks=0"):
+            parse_club_page("<html><title>Padel Amigos</title>tenant_id</html>", "u")
+
     def test_page_without_data(self):
         with self.assertRaises(PlaytomicError):
             parse_club_page("<html>blocked</html>", "https://playtomic.com/clubs/x")
