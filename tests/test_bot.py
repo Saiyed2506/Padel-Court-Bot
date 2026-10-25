@@ -96,8 +96,9 @@ class RuleTests(unittest.TestCase):
                   ("15:00:00", 90, "48 EUR"),   # 16:00-17:30 ok
                   ("15:30:00", 90, "48 EUR"),   # 16:30 preferred
                   ("15:30:00", 60, "32 EUR"),   # wrong duration
-                  ("17:30:00", 90, "48 EUR"),   # 18:30-20:00 ok (ends exactly at 20:00)
-                  ("18:00:00", 90, "48 EUR"),   # 19:00-20:30 too late
+                  ("17:30:00", 90, "48 EUR"),   # 18:30-20:00 ok
+                  ("18:00:00", 90, "48 EUR"),   # 19:00-20:30 ok (last start)
+                  ("18:30:00", 90, "48 EUR"),   # 19:30-21:00 too late
                   ("14:30:00", 90, "48 EUR")),  # 15:30 too early
             avail("out", "2026-11-03", ("16:00:00", 90, "40 EUR")),     # outdoor
             avail("single", "2026-11-03", ("16:00:00", 90, "30 EUR")),  # single court
@@ -106,7 +107,8 @@ class RuleTests(unittest.TestCase):
         slots = parse_availability(raw, COURTS, TZ)
         matches = find_matches(slots, COURTS, self.s, self.now, target_day=date(2026, 11, 3))
         got = [(m.start.strftime("%H:%M"), m.court_name, m.preferred) for m in matches]
-        self.assertEqual(got, [("16:30", "Court 1", True), ("16:00", "Court 1", False), ("18:30", "Court 1", False)])
+        self.assertEqual(got, [("16:30", "Court 1", True), ("16:00", "Court 1", False), ("18:30", "Court 1", False),
+                               ("19:00", "Court 1", False)])
 
     def test_local_time_mode(self):
         raw = [avail("c1", "2026-11-03", ("16:30:00", 90, "48 EUR"))]

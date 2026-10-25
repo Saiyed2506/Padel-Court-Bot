@@ -14,7 +14,7 @@ Default slots (edit in `config.toml`):
 
 | Days    | Window        | Length | Matching start times              |
 |---------|---------------|--------|-----------------------------------|
-| Mon-Fri | 16:00 - 20:00 | 90 min | 16:00 ... 18:30 (⭐ 16:30, 17:00)  |
+| Mon-Fri | 16:00 - 20:30 | 90 min | 16:00 ... 19:00 (⭐ 16:30, 17:00)  |
 | Sat-Sun | 09:30 - 12:30 | 90 min | 09:30, 10:00, 10:30, 11:00        |
 
 A game must **fit completely** inside the window. Courts open 14 days ahead,

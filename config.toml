@@ -23,11 +23,11 @@ exclude_names = []      # e.g. ["Court 4"] to ignore a court by name
 days_ahead = 14
 
 # A slot matches when the whole game fits inside a window:
-# weekday 16:00-20:00 with 90 min => starts 16:00, 16:30, ... 18:30.
+# weekday 16:00-20:30 with 90 min => starts 16:00, 16:30, ... 19:00.
 [[watch.window]]
 days = ["mon", "tue", "wed", "thu", "fri"]
 start = "16:00"
-end = "20:00"
+end = "20:30"
 duration_minutes = 90
 preferred_starts = ["16:30", "17:00"]   # marked with a star and listed first
 
