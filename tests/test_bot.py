@@ -361,6 +361,9 @@ class ParseClubTests(unittest.TestCase):
     def test_normalize_club_url(self):
         self.assertEqual(normalize_club_url(" playtomic.com/clubs/padel-amigos?date=2026-10-27#top "),
                          "https://playtomic.com/clubs/padel-amigos")
+        for good in ("https://playtomic.com/de/clubs/padel-amigos-hamburg-halstenbek",
+                     "https://www.playtomic.com/en-gb/clubs/padel-amigos"):
+            self.assertEqual(normalize_club_url(good), good)
         for bad in ("https://example.com/clubs/x", "https://playtomic.com/", "hello"):
             with self.assertRaises(ValueError):
                 normalize_club_url(bad)

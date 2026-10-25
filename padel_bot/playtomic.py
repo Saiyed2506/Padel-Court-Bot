@@ -24,7 +24,8 @@ from datetime import date
 from pathlib import Path
 
 WEB_BASE = "https://playtomic.com"
-CLUB_URL_PATTERN = re.compile(r"^https://(www\.)?playtomic\.com/clubs/[A-Za-z0-9_-]+$")
+# Optional language part, e.g. https://playtomic.com/de/clubs/... or /en-gb/clubs/...
+CLUB_URL_PATTERN = re.compile(r"^https://(www\.)?playtomic\.com/([A-Za-z]{2}(-[A-Za-z]{2})?/)?clubs/[A-Za-z0-9_-]+$")
 _NEXT_DATA = re.compile(r'<script[^>]*id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL)
 
 
