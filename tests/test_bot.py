@@ -634,8 +634,19 @@ class ExploreTests(unittest.TestCase):
         self.assertEqual(find_events(html), [event])
         self.assertEqual(find_events("<html>nothing</html>"), [])
 
-    def test_candidates_include_event_id(self):
-        from padel_bot.explore import candidates
-        urls = dict(candidates(CLUB, "https://app.playtomic.com/tournaments/30edfbd8-8f5f-4b74-8075-500e4caa7c78?utm=x"))
-        self.assertIn("30edfbd8-8f5f-4b74-8075-500e4caa7c78", urls["app api: this event"])
-        self.assertIn("tenant_id=T1", urls["website api: club tournaments"])
+    def test_analyze_page(self):
+        import json as _json
+        from padel_bot.explore import analyze
+        event = {"id": "e1", "title": "Signup! Newcomer Club mit Coach David", "level": "0-3",
+                 "players": {"max": 4, "registered": 3}}
+        flight = _json.dumps({"activity": event})
+        html = ('<a href="/tournaments/e1">x</a><a href="/about">y</a>'
+                '<script>fetch("/api/v1/activities/e1")</script>'
+                '<script>self.__next_f.push([1,' + _json.dumps(flight) + '])</script>')
+        found = analyze(html, "newcomer")
+        self.assertEqual(found["objects"][0], event)
+        self.assertEqual(found["links"], ["/tournaments/e1"])
+        self.assertEqual(found["apis"], ["/api/v1/activities/e1"])
+        plain = analyze("<p>Join the Newcomer club</p>", "Newcomer")
+        self.assertEqual(plain["objects"], [])
+        self.assertIn("Newcomer club", plain["snippets"][0])

@@ -1,8 +1,9 @@
 """One-off diagnosis: where does Playtomic serve event (tournament) data?
 
 Run once from your laptop with `py -m padel_bot explore-events <event link>`
-(or explore-events.bat). It makes a handful of read-only requests, prints a
-short summary to screenshot, and writes details to explore_report.txt.
+(or explore-events.bat). It reads the club page and the event page (two
+read-only requests), prints a short summary to screenshot, and writes details
+to explore_report.txt.
 """
 
 from __future__ import annotations
@@ -16,25 +17,6 @@ from pathlib import Path
 from .playtomic import Club, _enclosing_objects, _page_texts
 
 _EVENT_KEY = re.compile(r'"(?:tournament_id|tournamentId)"\s*:')
-_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-
-def candidates(club: Club, event_url: str | None) -> list[tuple[str, str]]:
-    t = club.tenant_id
-    urls = [("club page", club.url)]
-    event_id = None
-    if event_url:
-        urls.append(("event share page", event_url))
-        match = _UUID.search(event_url)
-        event_id = match.group(0) if match else None
-    urls += [
-        ("website api: club tournaments", f"https://playtomic.com/api/clubs/tournaments?tenant_id={t}"),
-        ("website api: tournaments", f"https://playtomic.com/api/tournaments?tenant_id={t}&sport_id=PADEL"),
-        ("app api: tournaments", f"https://api.app.playtomic.io/v2/tournaments?tenant_id={t}&sport_id=PADEL"),
-    ]
-    if event_id:
-        urls.append(("app api: this event", f"https://api.app.playtomic.io/v2/tournaments/{event_id}"))
-    return urls
 
 
 def fetch(url: str, user_agent: str) -> tuple[int | str, str, str]:
@@ -86,25 +68,57 @@ def _short(obj: dict) -> str:
     return f"{str(name)[:40]} | {start} | places left: {places}"
 
 
-def run(club: Club, event_url: str | None, user_agent: str, report_path: Path, words=("Newcomer", "Afterwork")) -> None:
-    lines = [f"Club: {club.name} ({club.tenant_id})", ""]
+_HREF = re.compile(r'href="([^"#]{2,200})"')
+_API = re.compile(r'(https?://[a-z0-9.-]*playtomic\.[a-z]+/[A-Za-z0-9_./{}-]*api[A-Za-z0-9_./{}-]*'
+                  r'|https?://api[a-z0-9.-]*playtomic\.[a-z]+[A-Za-z0-9_./{}-]*'
+                  r'|"/api/[A-Za-z0-9_./{}-]{1,80}")')
+_INTERESTING = re.compile(r"tournament|activit|event|turnier|class|lesson|match|open", re.IGNORECASE)
+
+
+def analyze(body: str, word: str) -> dict:
+    """What a page holds around `word`, which links it has and which API
+    addresses it mentions - enough to plan a parser without seeing the page."""
+    objects, snippets = [], []
+    for text in _page_texts(body):
+        pos = text.lower().find(word.lower())
+        while pos >= 0 and len(objects) < 2:
+            for obj in _enclosing_objects(text, pos, max_tries=60):
+                if obj not in objects:
+                    objects.append(obj)
+                if len(objects) >= 2:
+                    break
+            if not objects and len(snippets) < 2:
+                snippets.append(re.sub(r"\s+", " ", text[max(0, pos - 150):pos + 250]))
+            pos = text.lower().find(word.lower(), pos + 1)
+        if objects:
+            break
+    links = sorted({h for h in _HREF.findall(body) if _INTERESTING.search(h)})[:15]
+    apis = sorted({a.strip('"') for a in _API.findall(body)})[:12]
+    return {"objects": objects, "snippets": snippets, "links": links, "apis": apis}
+
+
+def run(club: Club, event_url: str | None, user_agent: str, report_path: Path, word: str = "Newcomer") -> None:
+    pages = [("CLUB PAGE", club.url)] + ([("EVENT PAGE", event_url)] if event_url else [])
+    out = [f"Club: {club.name} ({club.tenant_id})"]
     details = []
-    for label, url in candidates(club, event_url):
+    for label, url in pages:
         status, ctype, body = fetch(url, user_agent)
-        events = find_events(body) if status == 200 else []
-        kind = "json" if "json" in ctype else "html" if "html" in ctype else ctype.split(";")[0] or "-"
-        mentions = [w for w in words if w.lower() in body.lower()]
-        lines.append(f"[{status}] {label}: {kind}, {len(body)} chars, events: {len(events)}"
-                     + (f", mentions {'/'.join(mentions)}" if mentions else ""))
-        for obj in events[:3]:
-            lines.append(f"      - {_short(obj)}")
+        out.append(f"\n{label} [{status}], {len(body)} chars")
         details.append(f"===== {label}\n{url}\nstatus {status}, content-type {ctype}\n")
-        if events:
-            details.append(f"{len(events)} event object(s); keys of the first: {sorted(events[0])}\n")
-            for obj in events[:2]:
-                details.append(json.dumps(obj, indent=1, ensure_ascii=False)[:4000] + "\n")
-        else:
-            details.append(body[:1500] + "\n")
+        if status != 200:
+            details.append(body[:1500])
+            continue
+        found = analyze(body, word)
+        for obj in found["objects"]:
+            out.append(f"  object around '{word}', keys: {', '.join(sorted(obj))[:300]}")
+            out.append("    " + json.dumps(obj, ensure_ascii=False)[:350])
+        for snippet in found["snippets"]:
+            out.append(f"  text around '{word}': ...{snippet[:300]}...")
+        if not found["objects"] and not found["snippets"]:
+            out.append(f"  '{word}' not found")
+        out.append(f"  links: {' | '.join(found['links'])[:400] or '-'}")
+        out.append(f"  api addresses: {' | '.join(found['apis'])[:400] or '-'}")
+        details.append(json.dumps(found, indent=1, ensure_ascii=False)[:20000])
     report_path.write_text("\n".join(details), encoding="utf-8")
-    print("\n".join(lines))
+    print("\n".join(out))
     print(f"\nDetails saved to {report_path.name}.")
