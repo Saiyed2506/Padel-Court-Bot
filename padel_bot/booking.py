@@ -205,7 +205,7 @@ class Outcome:
 class BookingManager:
     def __init__(self, settings_fn: Callable, booker: PlaytomicBooker, state_path: Path, log_path: Path,
                  notifier, tz, clock: Callable[[], datetime], *,
-                 slot_still_free: Callable[[Slot], bool] | None = None, reminders=None):
+                 fresh_slot: Callable[[Slot], Slot | None] | None = None, reminders=None):
         self.settings_fn = settings_fn          # current Settings (buttons can change them)
         self.booker = booker
         self.state_path = state_path
@@ -213,7 +213,7 @@ class BookingManager:
         self.notifier = notifier
         self.tz = tz
         self.clock = clock
-        self.slot_still_free = slot_still_free
+        self.fresh_slot = fresh_slot
         self.reminders = reminders
         try:
             self.state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -406,8 +406,13 @@ class BookingManager:
         reason = self.refuse_reason(slot, auto=auto)
         if not reason and auto:
             reason = self._check_my_day(slot)
-        if not reason and not fast and self.slot_still_free is not None and not self.slot_still_free(slot):
-            reason = "Someone else just booked it."
+        if not reason and not fast and self.fresh_slot is not None:
+            fresh = self.fresh_slot(slot)
+            if fresh is None:
+                reason = (f"No court free at {format_day(slot.start)} {format_time(slot.start)} anymore "
+                          "(taken - or held for a few minutes by a 🧪 test).")
+            else:
+                slot = fresh  # possibly another court at the same time
         if reason:
             return Outcome(False, f"Not booked: {reason}")
         try:

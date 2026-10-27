@@ -595,7 +595,7 @@ class Menu:
         warn = cancel_warning(slot.start, self.watcher.clock(), self.watcher.settings.free_cancel_min)
         split = (f"\nSplit payment: others pay their share (about €{slot.price_eur / rules.players:.2f} each) "
                  "when they join." if rules.split_payment else "")
-        text = (f"💳 Book {describe_slot(slot)} for €{slot.price_eur:g}?{split}\n"
+        text = (f"💳 Book {describe_slot(slot)} (or another free court at that time) for €{slot.price_eur:g}?{split}\n"
                 f"Payment: {' → '.join(m.replace('MERCHANT_WALLET', 'club wallet').replace('CREDIT_CARD', 'card').lower() for m in rules.payment_methods)}"
                 f"{chr(10) + warn.strip() if warn else ''}")
         self.notifier.send(text, buttons=[[(f"✅ Yes, book €{slot.price_eur:g}", f"by:{arg}"), ("✖ No", "bn")]])

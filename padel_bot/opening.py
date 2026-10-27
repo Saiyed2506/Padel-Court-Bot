@@ -150,7 +150,7 @@ class OpeningSniper:
                 if outcome.booked:
                     self._send(f"⚡ Grabbed at opening (+{delay:g}s)!\n{outcome.text}")
                     return True
-                if "Someone else" not in outcome.text and "Payment" not in outcome.text:
+                if "No court free" not in outcome.text and "Payment" not in outcome.text:
                     if outcome.text:
                         self._send(outcome.text)  # a rule or Playtomic said no: don't keep trying
                     return False

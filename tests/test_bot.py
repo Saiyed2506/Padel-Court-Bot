@@ -1151,6 +1151,13 @@ class AlertExtrasTests(MenuBase):
     def alerts(self):
         return [m for m in self.telegram.outbox if "Free court" in m["text"]]
 
+    def test_fresh_slot_picks_any_free_court(self):
+        self.client.replies["2026-10-28"] = [avail("c1", "2026-10-28", ("16:00:00", 90, "48 EUR"))]
+        held = Slot("c2", "Court 2", datetime(2026, 10, 28, 17, 0, tzinfo=TZ), 90, 48.0, "48 EUR")
+        self.assertEqual(self.watcher.fresh_slot(held).resource_id, "c1")
+        self.client.replies["2026-10-28"] = []
+        self.assertIsNone(self.watcher.fresh_slot(held))
+
     def test_list_alert_grouped_with_buttons(self):
         from padel_bot.booking import BookingManager, PlaytomicBooker
         tmp = Path(self.tmp.name)
@@ -1335,7 +1342,7 @@ class BookingTests(unittest.TestCase):
         self.reminders = Reminders(tmp / "rem.json", self.telegram, self.s.free_cancel_min)
         self.make = lambda: BookingManager(lambda: self.s, PlaytomicBooker(self.acc, "T1", self.s.booking),
                                            tmp / "bookings_state.json", tmp / "log.jsonl", self.telegram, TZ,
-                                           lambda: self.now, slot_still_free=lambda slot: self.free,
+                                           lambda: self.now, fresh_slot=lambda slot: slot if self.free else None,
                                            reminders=self.reminders)
         self.bm = self.make()
 
@@ -1425,7 +1432,7 @@ class BookingTests(unittest.TestCase):
         self.assertNotIn(("POST", "/v1/payment_intents/pi-1/confirmation"), self.paths())
         self.acc.price = 45
         self.free = False
-        self.assertIn("Someone else just booked it", self.bm.book(self.slot(), "tap").text)
+        self.assertIn("No court free at Wed 28 Oct 17:00 anymore", self.bm.book(self.slot(), "tap").text)
         self.free = True
         self.assertTrue(self.bm.book(self.slot(hour=17), "tap").booked)
         self.assertIn("limit 1/day", self.bm.book(self.slot(hour=19, court="c1"), "tap").text)
@@ -1448,6 +1455,14 @@ class BookingTests(unittest.TestCase):
         self.assertTrue(all(r.booked for r in results))
         self.assertTrue(all("🤖 BOOKED" in m for m in self.telegram.sent))
 
+    def test_books_another_court_at_same_time(self):
+        other = self.slot(court="c3")
+        self.bm.fresh_slot = lambda slot: other           # Indoor 2 is held, another court is free at 17:00
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        sent = [b for m, p, b in self.acc.calls if p == "/v1/payment_intents"][0]
+        self.assertEqual(sent["cart"]["requested_item"]["cart_item_data"]["resource_id"], "c3")
+
     def test_cannot_check_existing_bookings_means_no_auto(self):
         self.bm.state.update(stage="verified", auto=True)
         def broken(path, query=None):
@@ -1469,7 +1484,7 @@ class BookingMenuTests(MenuBase):
         self.acc = FakeBookingAccount()
         self.watcher.bookings = BookingManager(lambda: self.watcher.settings, PlaytomicBooker(self.acc, "T1", self.s.booking),
                                                tmp / "bs.json", tmp / "bl.jsonl", self.bc, TZ, self.watcher.clock,
-                                               slot_still_free=lambda slot: True)
+                                               fresh_slot=lambda slot: slot)
         self.friends.pending["777"] = "Ali (@ali_p)"
         self.friends.approve("777")
 
@@ -1489,7 +1504,7 @@ class BookingMenuTests(MenuBase):
         self.assertEqual(self.tap(f"bb:{pid}", chat_id=777), "Not allowed")   # friends can't book
         self.tap(f"bb:{pid}")
         ask = self.telegram.outbox[-1]
-        self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 for €45?", ask["text"])
+        self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 (or another free court at that time) for €45?", ask["text"])
         self.assertEqual(ask["buttons"][0][0], ("✅ Yes, book €45", f"by:{pid}"))
         self.assertEqual(self.tap(f"by:{pid}"), "Booked ✅")
         self.assertIn("✅ BOOKED", self.telegram.edits[-1]["text"])
@@ -1516,7 +1531,7 @@ class OpeningTests(unittest.TestCase):
         self.acc = FakeBookingAccount()
         self.bm = BookingManager(lambda: self.watcher.settings, PlaytomicBooker(self.acc, "T1", self.s.booking),
                                  tmp / "bs.json", tmp / "bl.jsonl", self.telegram, TZ, lambda: self.now,
-                                 slot_still_free=lambda slot: self.fail("fast path must not re-check"))
+                                 fresh_slot=lambda slot: self.fail("fast path must not re-check"))
         self.bm.state.update(stage="verified", auto=True)
         self.slept = []
 

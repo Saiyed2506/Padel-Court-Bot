@@ -98,13 +98,16 @@ class Watcher:
         self.matches_by_day.clear()
         self.request_check()
 
-    def slot_still_free(self, slot: Slot) -> bool:
-        """Re-read that day right before booking."""
+    def fresh_slot(self, slot: Slot) -> Slot | None:
+        """Re-read that day right before booking: the same court if it's still
+        free, otherwise another free court at the same time and length."""
         try:
             matches = self.fetch_matches(slot.start.date(), self.clock())
         except PlaytomicError:
-            return False
-        return any(m.key == slot.key for m in matches)
+            return None
+        same_time = [m for m in matches if m.start == slot.start and m.duration == slot.duration]
+        same_time.sort(key=lambda m: m.resource_id != slot.resource_id)
+        return same_time[0] if same_time else None
 
     def request_check(self) -> None:
         self.check_requested = True
