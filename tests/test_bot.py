@@ -1306,13 +1306,17 @@ class FakeBookingAccount:
         self.confirm_reply = {"match_id": "m-77", "status": "CONFIRMED"}
         self.confirm_error = None
         self.matches = []
+        self.patch_accepts = None       # e.g. lambda body: body == {"selected_payment_method": "MERCHANT_WALLET"}
 
     def send(self, method, path, body=None):
         self.calls.append((method, path, body))
         if path == "/v1/payment_intents":
             return {"payment_intent_id": "pi-1", "price": f"{self.price} EUR", "available_payment_methods": self.methods}
         if method == "PATCH":
-            self.selected = body["selected_payment_method"]
+            self.selected = body.get("selected_payment_method")
+            if self.patch_accepts is not None:
+                ok = self.patch_accepts(body)
+                return {"status": "REQUIRES_CONFIRMATION" if ok else "REQUIRES_PAYMENT_METHOD"}
             return {}
         if path.endswith("/confirmation"):
             if self.confirm_error:
@@ -1323,6 +1327,8 @@ class FakeBookingAccount:
         raise AssertionError(path)
 
     def get(self, path, query=None):
+        if path.startswith("/v1/payment_intents/"):
+            return {}                   # status unknown -> the bot goes ahead and confirms
         assert path == "/v1/matches"
         return self.matches
 
@@ -1404,6 +1410,22 @@ class BookingTests(unittest.TestCase):
         self.acc.matches = self.acc.matches[:1]
         self.bm.prepare()
         self.assertIn("You're back at 1 active court booking(s)", self.telegram.sent[-1])
+
+    def test_payment_method_format_is_found(self):
+        # Playtomic only accepts the method TYPE (like padel-cli sends), not the id
+        self.acc.patch_accepts = lambda body: body == {"selected_payment_method": "MERCHANT_WALLET"}
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        patches = [b for m, _, b in self.acc.calls if m == "PATCH"]
+        self.assertEqual(patches, [{"selected_payment_method": "w-1"}, {"selected_payment_method": "MERCHANT_WALLET"}])
+
+    def test_no_format_accepted_explains(self):
+        self.acc.patch_accepts = lambda body: False
+        out = self.bm.book(self.slot(), "tap")
+        self.assertFalse(out.booked)
+        self.assertIn("Nothing was paid", out.text)
+        self.assertIn("For Claude: MERCHANT_WALLET{balance,method_type,payment_method_id}", out.text)
+        self.assertNotIn("/confirmation", " ".join(p for _, p, _ in self.acc.calls))   # never confirmed blindly
 
     def test_wallet_refused_then_card(self):
         self.acc.refuse = {"w-1"}
