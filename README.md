@@ -294,6 +294,18 @@ and wishes stay as they are.
 
 ## Keeping it running on a laptop
 
+**Easiest:** double-click **`autostart.bat`** once. It asks two questions:
+1. start the bot automatically when you log in to Windows (a shortcut in your
+   Startup folder; the window starts minimised in the taskbar);
+2. keep the laptop awake while plugged in, also with the lid closed.
+
+`run-bot.bat` also restarts the bot by itself after a minute if it stops
+(e.g. no internet yet right after Windows starts). Undo the autostart with
+`autostart-off.bat`. Before `update.bat`, close the bot window (also the
+minimised one in the taskbar).
+
+### Doing it by hand
+
 - The bot only works while the laptop is **on and awake**. Closed lid or sleep
   means no alerts. To keep it awake while plugged in: Settings → System →
   Power & battery → Screen and sleep → *"When plugged in, put my device to
