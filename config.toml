@@ -61,11 +61,17 @@ alert_after_failed_rounds = 6 # warn you on Telegram if checks keep failing
 telegram_commands = true      # change wishes from Telegram: send /help to the bot
 daily_report = "08:00"        # daily "still watching" message; "off" to disable
 
-[auto_book]
-# Not implemented yet. Even when enabled, only dry-run (log only) is allowed.
-enabled = false
-dry_run = true
-max_price_eur = 0             # must be > 0 before enabled can be true
+[booking]
+# Booking needs your Playtomic login (/login) and pays from your account.
+# Turned on step by step from Telegram: 🧪 test -> 💳 one booking with a tap
+# -> 🤖 automatic (Settings). Nothing is booked before you start that.
+max_price_eur = 70            # never book a court that costs more (whole court)
+players = 4
+split_payment = true          # others pay their share in Playtomic
+payment_methods = ["MERCHANT_WALLET", "CREDIT_CARD"]   # club wallet first, then card
+auto_min_hours = 24           # automatic bookings only if still cancellable for free
+max_per_day = 1               # at most this many bot bookings per day of play
+max_per_week = 0              # 0 = no weekly limit
 
 [events]
 # Club events, matched by name: group classes (public) and Open Play events

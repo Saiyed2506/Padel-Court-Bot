@@ -94,7 +94,10 @@ class PlaytomicAccount:
                 return json.loads(response.read().decode("utf-8") or "null")
         except urllib.error.HTTPError as exc:
             retryable = exc.code == 429 or exc.code >= 500
-            raise PlaytomicError(f"HTTP {exc.code} for {path}", status=exc.code, retryable=retryable) from None
+            # Playtomic's error text helps when a booking is refused (e.g. "slot not available").
+            detail = exc.read().decode("utf-8", "replace")[:300].replace("\n", " ") if method != "POST" or "auth" not in path else ""
+            raise PlaytomicError(f"HTTP {exc.code} for {path}" + (f": {detail}" if detail else ""),
+                                 status=exc.code, retryable=retryable) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             raise PlaytomicError(f"network error for {path}: {getattr(exc, 'reason', exc)}") from None
         except json.JSONDecodeError:
@@ -140,18 +143,29 @@ class PlaytomicAccount:
 
     def get(self, path: str, query: dict | None = None):
         """GET with the login; renews the token once if the server rejects it."""
+        return self._authed("GET", path, query=query)
+
+    def send(self, method: str, path: str, body: dict | None = None):
+        """POST/PATCH with the login - used only by booking.py."""
+        return self._authed(method, path, body=body)
+
+    def _authed(self, method: str, path: str, *, query: dict | None = None, body: dict | None = None):
         try:
-            return self._request("GET", path, query=query, bearer=self._access_token())
+            return self._request(method, path, query=query, body=body, bearer=self._access_token())
         except PlaytomicError as exc:
             if exc.status != 401 or isinstance(exc, AuthError):
                 raise
         self._refresh()
         try:
-            return self._request("GET", path, query=query, bearer=self.token["access_token"])
+            return self._request(method, path, query=query, body=body, bearer=self.token["access_token"])
         except PlaytomicError as exc:
             if exc.status == 401:
                 raise AuthError("Playtomic rejected the login - send /login to the bot.") from None
             raise
+
+    @property
+    def user_id(self) -> str:
+        return str(self.token.get("user_id") or "")
 
     # --- the one thing we read ---------------------------------------------
 

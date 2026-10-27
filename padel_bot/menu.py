@@ -131,7 +131,7 @@ class Menu:
         """Handle one tap. Returns a short toast text (may be empty)."""
         key, _, arg = data.partition(":")
         handler = {
-            "m": self._go_main, "g": self._go_guide, "x": self._cancel,
+            "m": self._go_main, "g": self._go_guide, "x": self._cancel, "bn": self._booking_no,
             "cw": self._start_recurring, "ow": self._start_once,
             "d": self._toggle_day, "dt": self._pick_date, "s": self._pick_start,
             "l": self._pick_last, "u": self._pick_length, "ok": self._confirm,
@@ -143,6 +143,7 @@ class Menu:
             "sq": self._cycle_quiet, "sl": self._login, "slo": self._logout,
             "sb": self._cycle_buffer, "sr": self._toggle_report,
             "md": self._mute_day, "um": self._unmute_day, "rb": self._remove_booking,
+            "bt": self._test_booking, "bb": self._ask_booking, "by": self._do_booking, "sa": self._toggle_auto,
         }.get(key)
         if handler is None:
             return "This button is from an older version - tap 🎾 Menu."
@@ -154,6 +155,10 @@ class Menu:
 
     def _go_guide(self, arg, mid):
         self._screen(mid, GUIDE, [BACK])
+
+    def _booking_no(self, arg, mid):
+        self._screen(mid, "Not booked.", [])
+        return "OK"
 
     def _cancel(self, arg, mid):
         self._go_main(arg, mid)
@@ -443,6 +448,12 @@ class Menu:
         quiet = w.settings.quiet_hours
         quiet_text = f"{hhmm(quiet[0])}-{hhmm(quiet[1])}" if quiet else "off"
         account = w.events.account if w.events else None
+        if w.bookings is not None:
+            label = {"verified": "ON" if w.bookings.auto_on else "off",
+                     "tested": "🔒 book once with a tap first", "new": "🔒 test + book once first"}[w.bookings.stage]
+            rows_booking = [[(f"🤖 Automatic booking: {label}", "sa")]]
+        else:
+            rows_booking = []
         notice = w.settings.min_notice_min // 60
         report = w.settings.daily_report_min
         rows = [
@@ -451,7 +462,7 @@ class Menu:
             [(f"⏱ Only games ≥{notice}h ahead" if notice else "⏱ All games, also last-minute", "sb")],
             [(f"🌙 Night pause: {quiet_text}", "sq")],
             [(f"☀️ Daily check-in: {hhmm(report) if report is not None else 'off'}", "sr")],
-        ]
+        ] + rows_booking
         if account is not None:
             rows.append([("🔐 Playtomic: log out", "slo")] if account.logged_in
                         else [("🔐 Playtomic: log in", "sl")])
@@ -521,6 +532,81 @@ class Menu:
         self.watcher.set_windows(self.watcher.settings.windows)  # re-check: alerts for that day come back
         self._go_wishes("", mid)
         return "🔔 Alerts for that day are back"
+
+    # --- booking -------------------------------------------------------------------
+
+    def booking_button(self, pid: str, poll: dict):
+        """Extra button on your copy of a court alert."""
+        bookings = self.watcher.bookings
+        if bookings is None:
+            return None
+        if bookings.stage == "new":
+            return [("🧪 Test booking (no payment)", f"bt:{pid}")]
+        price = (poll.get("slot") or {}).get("price_eur")
+        return [(f"💳 Book{f' €{price:g}' if price else ''}", f"bb:{pid}")]
+
+    def _alert_slot(self, pid):
+        polls = self.watcher.polls
+        return polls.slot(pid) if polls is not None else None
+
+    def _test_booking(self, arg, mid):
+        slot = self._alert_slot(arg)
+        if slot is None or self.watcher.bookings is None:
+            return "This alert is too old"
+        self.notifier.send(self.watcher.bookings.test(slot))
+        return "Test done - see the message"
+
+    def _ask_booking(self, arg, mid):
+        from .booking import describe_slot
+        from .notify import cancel_warning
+
+        slot, bookings = self._alert_slot(arg), self.watcher.bookings
+        if slot is None or bookings is None:
+            return "This alert is too old"
+        reason = bookings.refuse_reason(slot, auto=False)
+        if reason:
+            return reason[:190]
+        rules = bookings.rules
+        warn = cancel_warning(slot.start, self.watcher.clock(), self.watcher.settings.free_cancel_min)
+        split = (f"\nSplit payment: others pay their share (about €{slot.price_eur / rules.players:.2f} each) "
+                 "when they join." if rules.split_payment else "")
+        text = (f"💳 Book {describe_slot(slot)} for €{slot.price_eur:g}?{split}\n"
+                f"Payment: {' → '.join(m.replace('MERCHANT_WALLET', 'club wallet').replace('CREDIT_CARD', 'card').lower() for m in rules.payment_methods)}"
+                f"{chr(10) + warn.strip() if warn else ''}")
+        self.notifier.send(text, buttons=[[(f"✅ Yes, book €{slot.price_eur:g}", f"by:{arg}"), ("✖ No", "bn")]])
+        return ""
+
+    def _do_booking(self, arg, mid):
+        slot, bookings = self._alert_slot(arg), self.watcher.bookings
+        if slot is None or bookings is None:
+            return "This alert is too old"
+        self._screen(mid, "⏳ Booking...", [])
+        outcome = bookings.book(slot, "tap")
+        self._screen(mid, outcome.text, [])
+        if outcome.booked:
+            self._tell_players(arg, outcome.text)
+        return "Booked ✅" if outcome.booked else "Not booked"
+
+    def _tell_players(self, pid: str, booked_text: str) -> None:
+        """Send the booking to friends who tapped ✅ I'm in, so they can join and pay their share."""
+        poll = (self.watcher.polls.polls if self.watcher.polls else {}).get(pid) or {}
+        owner = str(self.notifier.chat_id)
+        link = next((line for line in booked_text.splitlines() if line.startswith("Match: ")), "")
+        for chat_id in poll.get("in", {}):
+            if chat_id == owner:
+                continue
+            self._tell(chat_id, f"🎾 Booked: {poll.get('label', 'the court')}. "
+                                f"Join the match in Playtomic and pay your share.\n{link}".strip())
+
+    def _toggle_auto(self, arg, mid):
+        bookings = self.watcher.bookings
+        if bookings is None:
+            return "Booking isn't set up"
+        toast = bookings.set_auto(not bookings.auto_on)
+        if bookings.auto_on:
+            bookings.auto_book(self.watcher.current_matches())  # also slots already found
+        self._go_settings("", mid)
+        return toast
 
     def _login(self, arg, mid):
         self.notifier.send(self.center.handle("/login"))

@@ -9,8 +9,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from padel_bot.booking import AutoBooker
-from padel_bot.config import AutoBookSettings, ConfigError, load_dotenv, load_settings
+from padel_bot.config import ConfigError, load_dotenv, load_settings
 from padel_bot.notify import NotifyError, build_messages, format_slot
 from padel_bot.playtomic import (Club, Court, PlaytomicError, load_or_fetch_club,
                                  normalize_club_url, parse_club_page, load_club)
@@ -151,21 +150,14 @@ class ConfigTests(unittest.TestCase):
         s = load_settings(REPO / "config.toml", require_club=False)
         self.assertEqual(s.booking_url, "{club_url}?date={date}")
         self.assertTrue(s.api_times_utc)
-        self.assertFalse(s.auto_book.enabled)
-        self.assertTrue(s.auto_book.dry_run)
+        self.assertEqual((s.booking.max_price_eur, s.booking.players, s.booking.max_per_day), (70, 4, 1))
+        self.assertEqual(s.booking.payment_methods, ("MERCHANT_WALLET", "CREDIT_CARD"))
         self.assertEqual(s.days_ahead, 14)
 
     def test_missing_club_is_explained(self):
         with self.assertRaisesRegex(ConfigError, "START-HERE"):
             load_settings(REPO / "config.toml")
 
-    def test_autobook_needs_max_price(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            text = (REPO / "config.toml").read_text(encoding="utf-8").replace("enabled = false", "enabled = true")
-            path = Path(tmp) / "config.toml"
-            path.write_text(text, encoding="utf-8")
-            with self.assertRaisesRegex(ConfigError, "max_price_eur"):
-                load_settings(path, require_club=False)
 
     def test_polling_floor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,40 +183,6 @@ class ConfigTests(unittest.TestCase):
 
     def test_gitignore_excludes_env(self):
         self.assertIn(".env", (REPO / ".gitignore").read_text().splitlines())
-
-
-class BookingTests(unittest.TestCase):
-    slot = Slot("c1", "Court 1", datetime(2026, 10, 27, 17, 0, tzinfo=TZ), 90, 48.0, "48 EUR")
-
-    def test_disabled_by_default(self):
-        booker = AutoBooker(AutoBookSettings(), confirm=lambda s: self.fail("must not ask"))
-        self.assertEqual(booker.consider(self.slot).action, "skipped")
-
-    def test_requires_max_price(self):
-        with self.assertRaises(ValueError):
-            AutoBooker(AutoBookSettings(enabled=True), confirm=lambda s: True)
-
-    def test_real_booking_refused_without_backend(self):
-        with self.assertRaises(ValueError):
-            AutoBooker(AutoBookSettings(enabled=True, dry_run=False, max_price_eur=60), confirm=lambda s: True)
-
-    def test_price_cap_and_dry_run(self):
-        booker = AutoBooker(AutoBookSettings(enabled=True, max_price_eur=40), confirm=lambda s: self.fail("must not ask"))
-        self.assertEqual(booker.consider(self.slot).action, "skipped")  # €48 > €40
-        booker = AutoBooker(AutoBookSettings(enabled=True, max_price_eur=60), confirm=lambda s: self.fail("must not ask"))
-        self.assertEqual(booker.consider(self.slot).action, "dry_run")
-
-    def test_confirmation_required(self):
-        class Backend:
-            booked = []
-            def book(self, slot):
-                self.booked.append(slot)
-                return "ref-1"
-        backend = Backend()
-        live = AutoBookSettings(enabled=True, dry_run=False, max_price_eur=60)
-        self.assertEqual(AutoBooker(live, confirm=lambda s: False, backend=backend).consider(self.slot).action, "skipped")
-        self.assertEqual(backend.booked, [])
-        self.assertEqual(AutoBooker(live, confirm=lambda s: True, backend=backend).consider(self.slot).action, "booked")
 
 
 class FakeClient:
@@ -273,7 +231,7 @@ class WatcherTests(unittest.TestCase):
         self.client = FakeClient()
         self.notifier = FakeNotifier()
         self.watcher = Watcher(self.s, self.client, CLUB, self.notifier, SeenState(self.s.state_file), TZ,
-                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               None,
                                clock=lambda: self.now, sleep=lambda s: None)
 
     def tearDown(self):
@@ -298,7 +256,7 @@ class WatcherTests(unittest.TestCase):
         self.client.replies["2026-10-27"] = [avail("c2", "2026-10-27", ("16:00:00", 90, "48 EUR"))]
         self.watcher.run_round()
         again = Watcher(self.s, self.client, CLUB, self.notifier, SeenState(self.s.state_file), TZ,
-                        self.watcher.booker, clock=lambda: self.now, sleep=lambda s: None)
+                        None, clock=lambda: self.now, sleep=lambda s: None)
         self.assertEqual(again.run_round(), [])
 
     def test_failed_telegram_send_retries_next_round(self):
@@ -572,7 +530,7 @@ class CommandTests(unittest.TestCase):
         self.client = FakeClient()
         self.telegram = FakeTelegram()
         self.watcher = Watcher(self.s, self.client, CLUB, self.telegram, SeenState(self.s.state_file), TZ,
-                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               None,
                                clock=lambda: self.now, sleep=lambda s: None)
         self.store = WishStore(Path(self.tmp.name) / "wishes.json", self.s.windows)
         self.cc = CommandCenter(self.watcher, self.telegram, self.store, sleep=lambda s: None)
@@ -843,7 +801,7 @@ class EventWatcherTests(unittest.TestCase):
         from padel_bot.commands import CommandCenter
         from padel_bot.wishes import WishStore
         watcher = Watcher(self.s, FakeClient(), CLUB, self.telegram, SeenState(self.s.state_file), TZ,
-                          AutoBooker(self.s.auto_book, confirm=lambda s: False), clock=lambda: self.now, sleep=lambda s: None)
+                          None, clock=lambda: self.now, sleep=lambda s: None)
         watcher.events = self.ew
         cc = CommandCenter(watcher, self.telegram, WishStore(Path(self.tmp.name) / "w.json", self.s.windows))
         self.assertIn("still to come", cc.handle("/events"))
@@ -904,7 +862,7 @@ class TelegramLoginTests(unittest.TestCase):
         self.telegram.deleted = []
         self.telegram.delete_message = lambda mid: self.telegram.deleted.append(mid)
         self.watcher = Watcher(self.s, FakeClient(), CLUB, self.telegram, SeenState(self.s.state_file), TZ,
-                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               None,
                                clock=lambda: self.now, sleep=lambda s: None)
 
         class Account:
@@ -992,7 +950,7 @@ class MenuBase(unittest.TestCase):
         self.bc = Broadcaster(self.telegram, self.friends)
         self.client = FakeClient()
         self.watcher = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
-                               AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                               None,
                                clock=lambda: self.now, sleep=lambda s: None)
 
         class Events:
@@ -1095,7 +1053,7 @@ class MenuTests(MenuBase):
         self.assertIn("01:00-06:00", self.tap("sq"))
         self.assertIn("off", self.tap("sq").lower())  # 23-07 -> 00-07 -> 01-06 -> off
         fresh = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
-                        AutoBooker(self.s.auto_book, confirm=lambda s: False), clock=lambda: self.now)
+                        None, clock=lambda: self.now)
         RuntimeSettings(Path(self.tmp.name) / "bot_settings.json").apply(fresh)
         self.assertTrue(fresh.paused)
         self.assertTrue(fresh.settings.only_preferred)
@@ -1278,6 +1236,200 @@ class AlertExtrasTests(MenuBase):
         self.assertEqual(len(reports), 1)
         self.assertIn("court checks", reports[0])
         late_start = Watcher(self.s, self.client, CLUB, self.bc, SeenState(self.s.state_file), TZ,
-                             AutoBooker(self.s.auto_book, confirm=lambda s: False),
+                             None,
                              clock=lambda: datetime(2026, 10, 27, 9, 0, tzinfo=TZ))
         self.assertFalse(late_start.daily_report_due(datetime(2026, 10, 27, 9, 0, tzinfo=TZ)))  # tomorrow
+
+
+class FakeBookingAccount:
+    """Scripted Playtomic payment API."""
+    logged_in = True
+    user_id = "u1"
+
+    def __init__(self):
+        self.calls = []
+        self.price = 45
+        self.methods = [{"method_type": "MERCHANT_WALLET", "payment_method_id": "w-1"},
+                        {"method_type": "CREDIT_CARD", "payment_method_id": "c-9"}]
+        self.refuse = set()            # method ids whose PATCH or confirmation is refused
+        self.confirm_reply = {"match_id": "m-77", "status": "CONFIRMED"}
+        self.confirm_error = None
+        self.matches = []
+
+    def send(self, method, path, body=None):
+        self.calls.append((method, path, body))
+        if path == "/v1/payment_intents":
+            return {"payment_intent_id": "pi-1", "price": f"{self.price} EUR", "available_payment_methods": self.methods}
+        if method == "PATCH":
+            self.selected = body["selected_payment_method"]
+            return {}
+        if path.endswith("/confirmation"):
+            if self.confirm_error:
+                raise self.confirm_error
+            if self.selected in self.refuse:
+                raise PlaytomicError("HTTP 402 for confirmation: insufficient funds", status=402)
+            return self.confirm_reply
+        raise AssertionError(path)
+
+    def get(self, path, query=None):
+        assert path == "/v1/matches"
+        return self.matches
+
+
+class BookingTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.booking import BookingManager, PlaytomicBooker
+        from padel_bot.reminders import Reminders
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.s = settings(tmp)
+        self.now = datetime(2026, 10, 26, 8, 0, tzinfo=TZ)   # Monday
+        self.acc = FakeBookingAccount()
+        self.telegram = FakeNotifier()
+        self.telegram.chat_id = "42"
+        self.free = True
+        self.reminders = Reminders(tmp / "rem.json", self.telegram, self.s.free_cancel_min)
+        self.make = lambda: BookingManager(lambda: self.s, PlaytomicBooker(self.acc, "T1", self.s.booking),
+                                           tmp / "bookings_state.json", tmp / "log.jsonl", self.telegram, TZ,
+                                           lambda: self.now, slot_still_free=lambda slot: self.free,
+                                           reminders=self.reminders)
+        self.bm = self.make()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def slot(self, day=28, hour=17, price=45.0, preferred=False, court="c2"):
+        return Slot(court, "Indoor 2", datetime(2026, 10, day, hour, 0, tzinfo=TZ), 90, price, f"{price:g} EUR", preferred)
+
+    def paths(self):
+        return [(m, p) for m, p, _ in self.acc.calls]
+
+    def test_payload(self):
+        from padel_bot.booking import PlaytomicBooker
+        data = PlaytomicBooker(self.acc, "T1", self.s.booking).payload(self.slot())["cart"]["requested_item"]["cart_item_data"]
+        self.assertEqual((data["start"], data["duration"], data["number_of_players"], data["supports_split_payment"]),
+                         ("2026-10-28T16:00:00", 90, 4, True))     # 17:00 CET -> 16:00 UTC
+        self.assertEqual((data["tenant_id"], data["resource_id"]), ("T1", "c2"))
+
+    def test_stage1_test_never_confirms(self):
+        text = self.bm.test(self.slot())
+        self.assertIn("NOT confirmed, nothing paid", text)
+        self.assertIn("I would pay with: club wallet, card", text)
+        self.assertEqual(self.paths(), [("POST", "/v1/payment_intents")])
+        self.assertEqual(self.bm.stage, "tested")
+        self.assertIn("🔒", self.bm.set_auto(True))
+
+    def test_stage2_tap_booking_with_wallet(self):
+        self.bm.test(self.slot())
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("✅ Booked: Wed 28 Oct 17:00-18:30, Indoor 2, €45 via club wallet", out.text)
+        self.assertIn("Free cancellation until Tue 27 Oct 17:00", out.text)
+        self.assertIn("https://app.playtomic.com/matches/m-77", out.text)
+        self.assertEqual([b for m, _, b in self.acc.calls if m == "PATCH"], [{"selected_payment_method": "w-1"}])
+        self.assertEqual(self.bm.stage, "verified")
+        self.assertEqual(len(self.reminders.items), 1)
+        self.assertEqual(self.make().stage, "verified")          # survives a restart
+        again = self.bm.book(self.slot(), "tap")
+        self.assertIn("already booked", again.text)
+
+    def test_wallet_refused_then_card(self):
+        self.acc.refuse = {"w-1"}
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("via card", out.text)
+
+    def test_bank_confirmation_needed(self):
+        self.acc.confirm_reply = {"status": "REQUIRES_ACTION", "next_action": {"redirect_url": "https://bank"}}
+        out = self.bm.book(self.slot(), "tap")
+        self.assertFalse(out.booked)
+        self.assertIn("Open the Playtomic app", out.text)
+
+    def test_unclear_outcome_never_retries_and_pauses_auto(self):
+        self.bm.state.update(stage="verified", auto=True)
+        self.acc.confirm_error = PlaytomicError("network error", status=None)
+        out = self.bm.book(self.slot(), "auto")
+        self.assertIn("check your bookings in the Playtomic app", out.text)
+        self.assertEqual(sum(1 for _, p in self.paths() if p.endswith("/confirmation")), 1)
+        self.assertFalse(self.bm.auto_on)
+
+    def test_limits(self):
+        self.assertIn("above your limit of €70", self.bm.book(self.slot(price=75), "tap").text)
+        self.acc.price = 80                                       # Playtomic's own price is higher
+        self.assertIn("above your limit", self.bm.book(self.slot(), "tap").text)
+        self.assertNotIn(("POST", "/v1/payment_intents/pi-1/confirmation"), self.paths())
+        self.acc.price = 45
+        self.free = False
+        self.assertIn("Someone else just booked it", self.bm.book(self.slot(), "tap").text)
+        self.free = True
+        self.assertTrue(self.bm.book(self.slot(hour=17), "tap").booked)
+        self.assertIn("limit 1/day", self.bm.book(self.slot(hour=19, court="c1"), "tap").text)
+
+    def test_automatic_rules(self):
+        self.assertEqual(self.bm.auto_book([self.slot()]), [])    # locked
+        self.bm.book(self.slot(day=30), "tap")                    # first real booking: Fri 30
+        self.assertIn("ON", self.bm.set_auto(True))
+        self.acc.matches = [{"start_date": "2026-10-29T09:00:00"}]   # you already play Thu 29 (10:00)
+        new = [self.slot(day=27, hour=17),                        # Tue: only 33h ahead? no - 57h, ok
+               self.slot(day=26, hour=19),                        # today: <24h, never automatic
+               self.slot(day=29, hour=18),                        # Thu: you already play
+               self.slot(day=30, hour=18),                        # Fri: bot already booked that day
+               self.slot(day=31, hour=10, preferred=True),        # Sat: fine
+               self.slot(day=31, hour=11)]                        # Sat: second one that day: no
+        results = self.bm.auto_book(new)
+        booked_days = sorted(b["day"] for b in self.bm.state["bookings"])
+        self.assertEqual(booked_days, ["2026-10-27", "2026-10-30", "2026-10-31"])
+        self.assertEqual(len(results), 2)                          # Tue + Sat; the rest skipped quietly
+        self.assertTrue(all(r.booked for r in results))
+        self.assertTrue(all("🤖 Booked automatically" in m for m in self.telegram.sent))
+
+    def test_cannot_check_existing_bookings_means_no_auto(self):
+        self.bm.state.update(stage="verified", auto=True)
+        def broken(path, query=None):
+            raise PlaytomicError("HTTP 404", status=404)
+        self.acc.get = broken
+        self.assertIn("Couldn't check your existing Playtomic bookings", self.bm.book(self.slot(), "auto").text)
+        self.assertTrue(self.bm.book(self.slot(), "tap").booked)   # with your tap it still works
+
+
+class BookingMenuTests(MenuBase):
+    def setUp(self):
+        super().setUp()
+        from padel_bot.booking import BookingManager, PlaytomicBooker
+        from padel_bot.polls import Polls
+        tmp = Path(self.tmp.name)
+        self.telegram.chat_first_name = lambda chat_id: "Mo"
+        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends)
+        self.watcher.polls.owner_extra = self.menu.booking_button
+        self.acc = FakeBookingAccount()
+        self.watcher.bookings = BookingManager(lambda: self.watcher.settings, PlaytomicBooker(self.acc, "T1", self.s.booking),
+                                               tmp / "bs.json", tmp / "bl.jsonl", self.bc, TZ, self.watcher.clock,
+                                               slot_still_free=lambda slot: True)
+        self.friends.pending["777"] = "Ali (@ali_p)"
+        self.friends.approve("777")
+
+    def test_alert_buttons_test_then_book(self):
+        self.client.replies["2026-10-28"] = [avail("c2", "2026-10-28", ("15:30:00", 90, "45 EUR"))]
+        self.watcher.run_round()
+        owner, friend = [m for m in self.telegram.outbox if "Free court" in m["text"]]
+        owner_data = [d for row in owner["buttons"] for _, d in row]
+        self.assertTrue(any(d.startswith("bt:") for d in owner_data))
+        self.assertFalse(any(d.startswith(("bt:", "bb:")) for row in friend["buttons"] for _, d in row))
+        pid = [d for d in owner_data if d.startswith("bt:")][0][3:]
+        self.tap(f"p:in:{pid}", chat_id=777)                       # Ali is in
+        self.tap(f"bt:{pid}")
+        self.assertIn("🧪 Test booking", self.telegram.sent[-1])
+        self.assertIn("💳 Book €45", [label for row in self.telegram.edits[-1]["buttons"] for label, _ in row] +
+                      [label for label, _ in self.menu.booking_button(pid, self.watcher.polls.polls[pid])])
+        self.assertEqual(self.tap(f"bb:{pid}", chat_id=777), "Not allowed")   # friends can't book
+        self.tap(f"bb:{pid}")
+        ask = self.telegram.outbox[-1]
+        self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 for €45?", ask["text"])
+        self.assertEqual(ask["buttons"][0][0], ("✅ Yes, book €45", f"by:{pid}"))
+        self.assertEqual(self.tap(f"by:{pid}"), "Booked ✅")
+        self.assertIn("✅ Booked", self.telegram.edits[-1]["text"])
+        to_ali = [m for m in self.telegram.outbox if m["chat_id"] == "777" and "Join the match" in m["text"]]
+        self.assertEqual(len(to_ali), 1)
+        self.tap("st")
+        self.assertIn("🤖 Automatic booking: off", self.labels())
+        self.assertIn("ON", self.tap("sa"))

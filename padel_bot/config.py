@@ -31,10 +31,14 @@ class Window:
 
 
 @dataclass(frozen=True)
-class AutoBookSettings:
-    enabled: bool = False
-    dry_run: bool = True
-    max_price_eur: float | None = None
+class BookingSettings:
+    max_price_eur: float = 70.0          # whole-court price limit
+    players: int = 4
+    split_payment: bool = True           # other players pay their share in Playtomic
+    payment_methods: tuple[str, ...] = ("MERCHANT_WALLET", "CREDIT_CARD")  # tried in this order
+    auto_min_hours: int = 24             # automatic bookings only this far ahead (free cancellation)
+    max_per_day: int = 1                 # bookings by the bot per day of play
+    max_per_week: int = 0                # 0 = no weekly limit
 
 
 @dataclass(frozen=True)
@@ -71,7 +75,7 @@ class Settings:
     alert_after_failed_rounds: int
     state_file: Path
     club_file: Path               # cached club ID and courts
-    auto_book: AutoBookSettings = field(default_factory=AutoBookSettings)
+    booking: BookingSettings = field(default_factory=BookingSettings)
 
 
 def load_dotenv(path: Path) -> None:
@@ -139,14 +143,27 @@ def _window(raw: dict, index: int) -> Window:
     )
 
 
-def _auto_book(raw: dict) -> AutoBookSettings:
-    enabled = bool(raw.get("enabled", False))
-    dry_run = bool(raw.get("dry_run", True))
-    max_price = raw.get("max_price_eur")
-    max_price = float(max_price) if max_price not in (None, "", 0) else None
-    if enabled and (max_price is None or max_price <= 0):
-        raise ConfigError("[auto_book] enabled = true requires max_price_eur > 0")
-    return AutoBookSettings(enabled=enabled, dry_run=dry_run, max_price_eur=max_price)
+def _booking(raw: dict) -> BookingSettings:
+    d = BookingSettings()
+    try:
+        b = BookingSettings(
+            max_price_eur=float(raw.get("max_price_eur", d.max_price_eur)),
+            players=int(raw.get("players", d.players)),
+            split_payment=bool(raw.get("split_payment", d.split_payment)),
+            payment_methods=tuple(str(m).upper() for m in raw.get("payment_methods", d.payment_methods)),
+            auto_min_hours=int(raw.get("auto_min_hours", d.auto_min_hours)),
+            max_per_day=int(raw.get("max_per_day", d.max_per_day)),
+            max_per_week=int(raw.get("max_per_week", d.max_per_week)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"[booking]: {exc}") from None
+    if b.max_price_eur <= 0:
+        raise ConfigError("[booking] max_price_eur must be more than 0")
+    if not 2 <= b.players <= 4:
+        raise ConfigError("[booking] players must be 2 or 4")
+    if b.max_per_day < 1:
+        raise ConfigError("[booking] max_per_day must be at least 1")
+    return b
 
 
 def _api_times_utc(value: str) -> bool:
@@ -258,5 +275,5 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         alert_after_failed_rounds=int(notify.get("alert_after_failed_rounds", 6)),
         state_file=config_path.parent / str(data.get("state_file", "state.json")),
         club_file=config_path.parent / "club.json",
-        auto_book=_auto_book(data.get("auto_book", {})),
+        booking=_booking(data.get("booking", {})),
     )

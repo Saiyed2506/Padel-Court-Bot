@@ -29,3 +29,6 @@ polls.json
 polls.json.tmp
 reminders.json
 reminders.json.tmp
+bookings_state.json
+bookings_state.json.tmp
+bookings_log.jsonl

@@ -9,7 +9,6 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Callable
 
-from .booking import AutoBooker
 from .config import Settings
 from .notify import NotifyError, booking_link, build_messages, format_slot
 from .playtomic import Club, PlaytomicClient, PlaytomicError
@@ -41,7 +40,7 @@ def seconds_until_quiet_end(now: datetime, quiet: tuple[int, int]) -> float:
 
 class Watcher:
     def __init__(self, settings: Settings, client: PlaytomicClient, club: Club, notifier,
-                 state: SeenState, tz: tzinfo, booker: AutoBooker, *,
+                 state: SeenState, tz: tzinfo, booker=None, *,
                  clock: Callable[[], datetime] | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  rng: random.Random | None = None):
@@ -52,7 +51,7 @@ class Watcher:
         self.notifier = notifier
         self.state = state
         self.tz = tz
-        self.booker = booker
+        self.bookings = None  # a BookingManager when booking is set up (booker arg is unused)
         self.clock = clock or (lambda: datetime.now(tz))
         self.sleep = sleep
         self.rng = rng or random.Random()
@@ -97,6 +96,14 @@ class Watcher:
         self.last_fetch.clear()   # re-check every day with the new wishes
         self.matches_by_day.clear()
         self.request_check()
+
+    def slot_still_free(self, slot: Slot) -> bool:
+        """Re-read that day right before booking."""
+        try:
+            matches = self.fetch_matches(slot.start.date(), self.clock())
+        except PlaytomicError:
+            return False
+        return any(m.key == slot.key for m in matches)
 
     def request_check(self) -> None:
         self.check_requested = True
@@ -259,9 +266,8 @@ class Watcher:
         self.stats["court_alerts"] += len(new_slots)
         for slot in new_slots:
             log.info("Alerted: %s %s %s", format_day(slot.start), slot.start.strftime("%H:%M"), slot.court_name)
-            decision = self.booker.consider(slot)
-            if decision.action != "skipped" or self.booker.settings.enabled:
-                log.info("Auto-book %s: %s", decision.action, decision.reason)
+        if self.bookings is not None:
+            self.bookings.auto_book(new_slots)  # does nothing unless automatic booking is on
 
     def _track_health(self, errors: list[PlaytomicError], checked: int) -> None:
         if not errors:

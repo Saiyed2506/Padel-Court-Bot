@@ -51,11 +51,28 @@ class Polls:
                 return "Host"
         return self._owner_name
 
-    @staticmethod
-    def buttons(pid: str, day_iso: str, owner: bool):
+    owner_extra = None  # set by the bot: (pid, poll) -> extra button row for you (booking)
+
+    def buttons(self, pid: str, day_iso: str, owner: bool, poll: dict | None = None):
         rows = [[("✅ I'm in", f"p:in:{pid}"), ("❌ Not me", f"p:out:{pid}")]]
         rows.append([("📌 I booked it", f"bk:c:{pid}")] + ([("🔕 Mute this day", f"md:{day_iso}")] if owner else []))
+        if owner and self.owner_extra is not None and poll is not None:
+            extra = self.owner_extra(pid, poll)
+            if extra:
+                rows.append(extra)
         return rows
+
+    def slot(self, pid: str):
+        """Rebuild the alerted slot (for booking it)."""
+        from .rules import Slot
+
+        poll = self.polls.get(pid)
+        data = (poll or {}).get("slot")
+        if not data:
+            return None
+        return Slot(data["resource_id"], data["court_name"], datetime.fromisoformat(data["start"]),
+                    int(data["duration"]), data.get("price_eur"), data.get("price_text", ""),
+                    bool(data.get("preferred")))
 
     def text(self, poll: dict) -> str:
         ins, outs = list(poll["in"].values()), list(poll["out"].values())
@@ -76,8 +93,12 @@ class Polls:
         label = (f"{format_day(slot.start)} {format_time(slot.start)}-{format_time(slot.end)}, "
                  f"{slot.court_name}")
         poll = {"text": base_text, "start": slot.start.isoformat(), "label": label,
+                "slot": {"resource_id": slot.resource_id, "court_name": slot.court_name,
+                         "start": slot.start.isoformat(), "duration": slot.duration,
+                         "price_eur": slot.price_eur, "price_text": slot.price_text,
+                         "preferred": slot.preferred},
                 "msgs": {}, "in": {}, "out": {}}
-        poll["msgs"] = self.notifier.broadcast(self.text(poll), buttons=self.buttons(pid, day, True),
+        poll["msgs"] = self.notifier.broadcast(self.text(poll), buttons=self.buttons(pid, day, True, poll),
                                                friend_buttons=self.buttons(pid, day, False), silent=silent)
         self.polls[pid] = poll
         self.prune(datetime.now(slot.start.tzinfo))
@@ -102,7 +123,7 @@ class Polls:
         day = poll["start"][:10]
         for target, message_id in poll["msgs"].items():
             try:
-                self.notifier.edit(message_id, text, buttons=self.buttons(pid, day, target == owner),
+                self.notifier.edit(message_id, text, buttons=self.buttons(pid, day, target == owner, poll),
                                    chat_id=target)
             except NotifyError as exc:
                 log.warning("Could not update a 'who's in' message: %s", exc)

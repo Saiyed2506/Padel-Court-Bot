@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .booking import AutoBooker
+from .booking import BookingManager, PlaytomicBooker
 from .config import ConfigError, Settings, load_dotenv, load_settings, require_env
 from .notify import NotifyError, TelegramNotifier, booking_link, format_slot
 from .playtomic import Club, PlaytomicClient, PlaytomicError, load_or_fetch_club, normalize_club_url
@@ -182,10 +182,7 @@ def cmd_run(args, settings: Settings) -> int:
     home = settings.state_file.parent
     friends = Friends(home / "friends.json")
     notifier = Broadcaster(telegram_from_env(), friends)  # alerts go to you + approved friends
-    booker = AutoBooker(settings.auto_book, confirm=lambda slot: False)  # confirmation flow: future work
-    if settings.auto_book.enabled:
-        log.warning("Auto-book is ON in DRY-RUN mode (max €%g): it will only log what it would do.",
-                    settings.auto_book.max_price_eur)
+    account = account_for(settings)  # one shared login: events, booking and /login use the same tokens
     club = get_club(settings)
     wanted = [c.name for c in club.courts if court_is_wanted(c, settings)]
     if not wanted:
@@ -194,15 +191,19 @@ def cmd_run(args, settings: Settings) -> int:
     store = wish_store(settings)
     settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
-                      SeenState(settings.state_file), tz, booker)
+                      SeenState(settings.state_file), tz)
     watcher.polls = Polls(home / "polls.json", notifier, friends)  # "who's in?" on court alerts
     watcher.reminders = Reminders(home / "reminders.json", notifier, settings.free_cancel_min)
     runtime = RuntimeSettings(home / "bot_settings.json")
     runtime.apply(watcher)  # pause / night pause / only-⭐ set with buttons earlier
     if settings.events_enabled:
         words = EventWords(home / "event_words.json", list(settings.event_words))
-        watcher.events = EventWatcher(watcher.settings, PlaytomicClient(settings.user_agent), account_for(settings),
+        watcher.events = EventWatcher(watcher.settings, PlaytomicClient(settings.user_agent), account,
                                       club, tz, home / "events_state.json", words, notifier)
+    watcher.bookings = BookingManager(
+        lambda: watcher.settings, PlaytomicBooker(account, club.tenant_id, settings.booking),
+        home / "bookings_state.json", home / "bookings_log.jsonl", notifier, tz, watcher.clock,
+        slot_still_free=watcher.slot_still_free, reminders=watcher.reminders)
     if settings.telegram_commands:
         watcher.commands = CommandCenter(watcher, notifier, store, friends=friends, runtime=runtime)
         watcher.commands.register_menu()

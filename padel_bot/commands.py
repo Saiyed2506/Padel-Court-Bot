@@ -71,6 +71,8 @@ class CommandCenter:
         self.friends = friends      # a Friends list, or None
         self.runtime = runtime      # RuntimeSettings for button-changed settings, or None
         self.menu = Menu(self, runtime) if runtime is not None else None
+        if self.menu is not None and getattr(watcher, "polls", None) is not None:
+            watcher.polls.owner_extra = self.menu.booking_button
         self._username: str | None = None
         self.monotonic = monotonic
         self.sleep = sleep
