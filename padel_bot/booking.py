@@ -155,33 +155,46 @@ class PlaytomicBooker:
         reply = self.account.get(f"/v1/payment_intents/{intent_id}")
         return reply if isinstance(reply, dict) else {}
 
-    def select(self, intent_id: str, kind: str, method_id: str) -> dict:
-        """Choose the payment method. Playtomic's exact format isn't documented, so try
-        the known variants until the payment says it's ready to be confirmed."""
-        variants = [{"selected_payment_method": method_id}]
+    SUCCESS = {"SUCCEEDED", "SUCCESS", "CONFIRMED", "PAID", "COMPLETED", "CAPTURED"}
+    FINAL_FAIL = {"FAILED", "CANCELED", "CANCELLED", "EXPIRED"}
+
+    def _status_now(self, intent_id: str, reply) -> str:
+        status = self.status(reply)
+        if not status:
+            try:
+                status = self.status(self.get_intent(intent_id))
+            except PlaytomicError:
+                status = ""
+        return status
+
+    def select(self, intent_id: str, kind: str, method_id: str, trace: list[str]) -> str:
+        """Choose the payment method; returns the payment's status afterwards.
+
+        Playtomic's exact format isn't documented, so the known variants are
+        tried until the payment is ready to confirm (or already paid). Every
+        step is written to `trace` for diagnosis. Stops at once on a final status.
+        """
+        short = METHOD_NAMES.get(kind, kind)
+        variants = [("id", {"selected_payment_method": method_id})]
         if kind != method_id:
-            variants.append({"selected_payment_method": kind})              # padel-cli sends the type
-        variants += [{"selected_payment_method_id": method_id},
-                     {"selected_payment_method": {"payment_method_id": method_id, "method_type": kind}}]
-        tried = []
-        for body in variants:
+            variants.append(("type", {"selected_payment_method": kind}))   # padel-cli sends the type
+        variants += [("id-field", {"selected_payment_method_id": method_id}),
+                     ("object", {"selected_payment_method": {"payment_method_id": method_id, "method_type": kind}})]
+        for label, body in variants:
             try:
                 reply = self.account.send("PATCH", f"/v1/payment_intents/{intent_id}", body)
             except PlaytomicError as exc:
                 if exc.status is not None and exc.status >= 500:
                     raise
-                tried.append(f"{list(body)[0]}: {exc}")
+                trace.append(f"{short}[{label}]→{exc}"[:160])
+                if "final status" in str(exc).lower():
+                    return "FAILED"
                 continue
-            status = self.status(reply)
-            if not status:
-                try:
-                    status = self.status(self.get_intent(intent_id))
-                except PlaytomicError:
-                    status = ""
-            if not status or status in self.READY:
-                return reply if isinstance(reply, dict) else {}
-            tried.append(f"{list(body)[0]}={'type' if body.get('selected_payment_method') == kind else 'id'}: status {status}")
-        raise BookingError(f"Playtomic didn't accept {METHOD_NAMES.get(kind, kind)} as payment ({'; '.join(tried)[:300]})")
+            status = self._status_now(intent_id, reply)
+            trace.append(f"{short}[{label}]→{status or 'no status'}")
+            if not status or status in self.READY or status in self.SUCCESS or status in self.FINAL_FAIL:
+                return status
+        return "NOT_ACCEPTED"
 
     @staticmethod
     def method_shapes(intent: dict) -> str:
@@ -190,10 +203,14 @@ class PlaytomicBooker:
         for entry in intent.get("available_payment_methods") or []:
             if isinstance(entry, dict):
                 kind = entry.get("method_type") or entry.get("type") or entry.get("code") or "?"
-                shapes.append(f"{kind}{{{','.join(sorted(entry))}}}")
+                data = entry.get("data")
+                inner = f"data({','.join(sorted(data))})" if isinstance(data, dict) else "data"
+                keys = [inner if k == "data" else k for k in sorted(entry)]
+                shapes.append(f"{kind}{{{','.join(keys)}}}")
             else:
                 shapes.append(repr(entry)[:30])
         return "; ".join(shapes)[:400]
+
 
     def confirm(self, intent_id: str) -> dict:
         reply = self.account.send("POST", f"/v1/payment_intents/{intent_id}/confirmation", {})
@@ -495,33 +512,49 @@ class BookingManager:
         if not methods:
             offered = ", ".join(t for t, _ in self.booker.methods(intent)) or "none"
             raise BookingError(f"None of your payment methods is offered (Playtomic offers: {offered}).")
-        last_error = None
+        trace: list[str] = []
+        fresh_needed = False
         for kind, method_id in methods:
-            try:
-                self.booker.select(intent_id, kind, method_id)
-            except (PlaytomicError, BookingError) as exc:
-                if isinstance(exc, PlaytomicError) and exc.status is not None and exc.status >= 500:
-                    raise
-                last_error = exc
+            if fresh_needed:
+                # the previous payment ended (FAILED): start a new one for the next method
+                intent = self.booker.create_intent(slot)
+                intent_id = intent["payment_intent_id"]
+                method_id = dict(self.booker.ordered_methods(intent)).get(kind, method_id)
+                trace.append("new payment")
+            status = self.booker.select(intent_id, kind, method_id, trace)
+            if status in self.booker.SUCCESS:
+                try:
+                    reply = self.booker.get_intent(intent_id)
+                except PlaytomicError:
+                    reply = {}
+                self._log(kind="book", mode=mode, slot=slot.key, method=kind, reply=reply, trace=trace)
+                return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
+            if status in self.booker.FINAL_FAIL or status == "NOT_ACCEPTED":
+                fresh_needed = status != "NOT_ACCEPTED"
                 continue  # e.g. not enough wallet credit: try the next method
             try:
                 reply = self.booker.confirm(intent_id)
             except PlaytomicError as exc:
-                if exc.status == 409:
+                if exc.status == 409 and "final status" not in str(exc).lower():
                     raise BookingError(str(exc)) from None  # e.g. too many active bookings: not a payment problem
                 if exc.status is not None and 400 <= exc.status < 500:
-                    last_error = exc
+                    trace.append(f"{METHOD_NAMES.get(kind, kind)} confirm→{exc}"[:160])
+                    fresh_needed = True
                     continue  # payment refused: nothing charged, next method
                 raise UnclearOutcome(f"I don't know whether the booking went through ({exc}).") from None
-            self._log(kind="book", mode=mode, slot=slot.key, method=kind, reply=reply)
+            trace.append(f"{METHOD_NAMES.get(kind, kind)} confirm→{self.booker.status(reply) or 'ok'}")
+            self._log(kind="book", mode=mode, slot=slot.key, method=kind, reply=reply, trace=trace)
             if self.booker.needs_action(reply):
                 return Outcome(False, f"💳 Playtomic needs you to confirm the payment ({METHOD_NAMES.get(kind, kind)}). "
                                       "Open the Playtomic app to finish it - the slot may already be held for you.")
+            if self.booker.status(reply) in self.booker.FINAL_FAIL:
+                fresh_needed = True
+                continue
             return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
-        self._log(kind="book", mode=mode, slot=slot.key, error=str(last_error),
-                  method_shapes=self.booker.method_shapes(intent))
-        raise BookingError(f"Payment didn't work with any of your methods ({last_error}). Nothing was paid.\n"
-                           f"For Claude: {self.booker.method_shapes(intent)}")
+        shapes = self.booker.method_shapes(intent)
+        self._log(kind="book", mode=mode, slot=slot.key, trace=trace, method_shapes=shapes)
+        raise BookingError("Payment didn't work with any of your methods. Nothing was paid.\n"
+                           f"For Claude: steps: {' | '.join(trace)[:600]}\nmethods: {shapes}")
 
     def _success(self, slot: Slot, mode: str, method: str, match_id: str, price: float | None,
                  wallet_before: float | None = None) -> Outcome:

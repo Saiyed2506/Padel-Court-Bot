@@ -1424,8 +1424,36 @@ class BookingTests(unittest.TestCase):
         out = self.bm.book(self.slot(), "tap")
         self.assertFalse(out.booked)
         self.assertIn("Nothing was paid", out.text)
-        self.assertIn("For Claude: MERCHANT_WALLET{balance,method_type,payment_method_id}", out.text)
+        self.assertIn("steps: club wallet[id]→REQUIRES_PAYMENT_METHOD | club wallet[type]→", out.text)
+        self.assertIn("methods: MERCHANT_WALLET{balance,method_type,payment_method_id}", out.text)
         self.assertNotIn("/confirmation", " ".join(p for _, p, _ in self.acc.calls))   # never confirmed blindly
+
+    def test_failed_wallet_then_card_on_a_new_payment(self):
+        self.acc.patch_accepts = lambda body: body.get("selected_payment_method") != "w-1"   # wallet id -> FAILED below
+        orig = self.acc.send
+        def send(method, path, body=None):
+            if method == "PATCH" and body == {"selected_payment_method": "w-1"}:
+                self.acc.calls.append((method, path, body))
+                return {"status": "FAILED"}
+            return orig(method, path, body)
+        self.acc.send = send
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("via card", out.text)
+        self.assertEqual(sum(1 for _, p, _ in self.acc.calls if p == "/v1/payment_intents"), 2)   # fresh payment
+
+    def test_paid_right_after_choosing_wallet(self):
+        self.acc.patch_accepts = None
+        orig = self.acc.send
+        def send(method, path, body=None):
+            if method == "PATCH":
+                self.acc.calls.append((method, path, body))
+                return {"status": "SUCCEEDED", "match_id": "m-9"}
+            return orig(method, path, body)
+        self.acc.send = send
+        out = self.bm.book(self.slot(), "tap")
+        self.assertTrue(out.booked, out.text)
+        self.assertNotIn("/v1/payment_intents/pi-1/confirmation", [p for _, p, _ in self.acc.calls])
 
     def test_wallet_refused_then_card(self):
         self.acc.refuse = {"w-1"}
