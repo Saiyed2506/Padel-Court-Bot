@@ -45,6 +45,26 @@ def format_slot(slot: Slot, link: str, now=None, free_cancel_min: int = 0) -> st
             f"{slot.court_name} indoor, {format_price(slot)}.{cancel_warning(slot.start, now, free_cancel_min)} Book: {link}")
 
 
+def group_by_time(slots: list[Slot]) -> list[list[Slot]]:
+    """Slots with the same start and length together (one line per time)."""
+    groups: dict[tuple, list[Slot]] = {}
+    for slot in slots:
+        groups.setdefault((slot.start, slot.duration), []).append(slot)
+    return list(groups.values())
+
+
+def format_group(group: list[Slot], link: str, now=None, free_cancel_min: int = 0) -> str:
+    """'Free: Tue 10 Nov, 08:00-09:30: Indoor 1, Indoor 2 · €48. Book: <link>'"""
+    if len(group) == 1:
+        return format_slot(group[0], link, now, free_cancel_min)
+    first = group[0]
+    star = "⭐ " if any(s.preferred for s in group) else ""
+    prices = sorted({format_price(s) for s in group})
+    return (f"{star}Free: {format_day(first.start)}, {format_time(first.start)}-{format_time(first.end)}: "
+            f"{', '.join(s.court_name for s in group)} · {'/'.join(prices)}."
+            f"{cancel_warning(first.start, now, free_cancel_min)} Book: {link}")
+
+
 def build_messages(slots: list[Slot], club_name: str, link_for_day, now=None, free_cancel_min: int = 0) -> list[str]:
     """One alert text (split into several if Telegram's size limit requires)."""
     if not slots:
@@ -52,8 +72,8 @@ def build_messages(slots: list[Slot], club_name: str, link_for_day, now=None, fr
     header = f"🎾 {len(slots)} new free court slot(s) at {club_name}"
     messages: list[str] = []
     current = header
-    for slot in slots:
-        line = format_slot(slot, link_for_day(slot.start.date()), now, free_cancel_min)
+    for group in group_by_time(slots):
+        line = format_group(group, link_for_day(group[0].start.date()), now, free_cancel_min)
         if len(current) + 2 + len(line) > TELEGRAM_LIMIT:
             messages.append(current)
             current = f"{header} (continued)"

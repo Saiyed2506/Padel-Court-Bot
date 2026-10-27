@@ -550,6 +550,26 @@ class Menu:
         price = (poll.get("slot") or {}).get("price_eur")
         return [(f"💳 Book{f' €{price:g}' if price else ''}", f"bb:{pid}")]
 
+    def list_buttons(self, slots, limit: int = 12):
+        """One 🧪/💳 button per start time (first free court of that time), for list alerts and /now."""
+        polls, bookings = self.watcher.polls, self.watcher.bookings
+        if polls is None or bookings is None:
+            return None
+        from .notify import group_by_time
+
+        rows, row = [], []
+        for group in group_by_time(slots)[:limit]:
+            slot = group[0]
+            pid = polls.register(slot)
+            icon = "🧪" if bookings.stage == "new" else "💳"
+            row.append((f"{icon} {slot.start.strftime('%d.%m %H:%M')}", f"{'bt' if icon == '🧪' else 'bb'}:{pid}"))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        return rows or None
+
     def _alert_slot(self, pid):
         polls = self.watcher.polls
         return polls.slot(pid) if polls is not None else None

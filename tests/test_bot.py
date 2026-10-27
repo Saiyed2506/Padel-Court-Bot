@@ -140,7 +140,7 @@ class RuleTests(unittest.TestCase):
         slot = Slot("c2", "Court 2", datetime(2026, 10, 27, 17, 0, tzinfo=TZ), 90, 48.0, "48 EUR", preferred=True)
         self.assertEqual(format_slot(slot, "https://x"),
                          "⭐ Free: Tue 27 Oct, 17:00-18:30, Court 2 indoor, €48. Book: https://x")
-        many = [slot] * 200
+        many = [_replace(slot, start=slot.start + timedelta(minutes=30 * i)) for i in range(200)]
         messages = build_messages(many, "Club", lambda d: "https://x")
         self.assertGreater(len(messages), 1)
         self.assertTrue(all(len(m) <= 4096 for m in messages))
@@ -1150,6 +1150,32 @@ class AlertExtrasTests(MenuBase):
 
     def alerts(self):
         return [m for m in self.telegram.outbox if "Free court" in m["text"]]
+
+    def test_list_alert_grouped_with_buttons(self):
+        from padel_bot.booking import BookingManager, PlaytomicBooker
+        tmp = Path(self.tmp.name)
+        self.watcher.bookings = BookingManager(lambda: self.watcher.settings,
+                                               PlaytomicBooker(FakeBookingAccount(), "T1", self.s.booking),
+                                               tmp / "bs.json", tmp / "bl.jsonl", self.bc, TZ, self.watcher.clock)
+        self.watcher.commands = self.cc
+        for day in ("2026-10-27", "2026-10-28"):
+            self.client.replies[day] = [avail(c, day, ("15:00:00", 90, "48 EUR"), ("16:00:00", 90, "48 EUR"))
+                                        for c in ("c1", "c2")]
+        self.watcher.run_round()
+        owner = [m for m in self.telegram.outbox if "new free court slot(s)" in m["text"] and m["chat_id"] is None][0]
+        friend = [m for m in self.telegram.outbox if "new free court slot(s)" in m["text"] and m["chat_id"] == "777"][0]
+        self.assertIn("Free: Tue 27 Oct, 16:00-17:30: Court 1, Court 2 · €48.", owner["text"])
+        self.assertEqual(owner["text"].count("Free:"), 4)           # 8 slots, 4 times
+        labels = [label for row in owner["buttons"] for label, _ in row]
+        self.assertEqual(labels, ["🧪 27.10 17:00", "🧪 27.10 16:00", "🧪 28.10 17:00", "🧪 28.10 16:00"])  # ⭐ 17:00 first
+        self.assertIsNone(friend["buttons"])
+        data = owner["buttons"][0][0][1]
+        self.assertTrue(self.tap(data).startswith("Test done"))
+        self.assertIn("🧪 Test booking", self.telegram.sent[-1])
+        # /now offers the same buttons any time
+        self.cc.process([message(9, "/now")])
+        self.assertIn("Tap a time to book it.", self.telegram.outbox[-1]["text"])
+        self.assertTrue(self.telegram.outbox[-1]["buttons"][0][0][0].startswith("💳"))
 
     def test_poll_alert_votes_and_silence(self):
         self.court("2026-10-28", "15:30:00")                 # Wed 16:30 = preferred

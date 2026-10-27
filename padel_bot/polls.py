@@ -104,6 +104,19 @@ class Polls:
         self.prune(datetime.now(slot.start.tzinfo))
         self._save()
 
+    def register(self, slot) -> str:
+        """Remember a slot (from a list alert or /now) so its 🧪/💳 button works; returns its id."""
+        pid = poll_id(slot.key)
+        if pid not in self.polls:
+            self.polls[pid] = {"text": "", "start": slot.start.isoformat(), "msgs": {}, "in": {}, "out": {},
+                               "label": f"{format_day(slot.start)} {format_time(slot.start)}-{format_time(slot.end)}, {slot.court_name}",
+                               "slot": {"resource_id": slot.resource_id, "court_name": slot.court_name,
+                                        "start": slot.start.isoformat(), "duration": slot.duration,
+                                        "price_eur": slot.price_eur, "price_text": slot.price_text,
+                                        "preferred": slot.preferred}}
+            self._save()
+        return pid
+
     def vote(self, pid: str, chat_id: str, choice: str) -> str:
         poll = self.polls.get(pid)
         if poll is None:

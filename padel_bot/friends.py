@@ -94,8 +94,7 @@ class Broadcaster:
         sent = {str(self.chat_id): self.notifier.send(text, buttons=buttons, **extra)}  # raises if *your* alert fails
         for chat_id, name in list(self.friends.approved.items()):
             try:
-                sent[chat_id] = self.notifier.send(text, buttons=friend_buttons if buttons else None,
-                                                   chat_id=chat_id, **extra)
+                sent[chat_id] = self.notifier.send(text, buttons=friend_buttons, chat_id=chat_id, **extra)
             except NotifyError as exc:
                 log.warning("Could not alert friend %s: %s", name, exc)
         return sent

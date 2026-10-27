@@ -164,7 +164,14 @@ class CommandCenter:
         if command == "/status":
             return self.watcher.status_text()
         if command == "/now":
-            return self._now_text()
+            text = self._now_text()
+            buttons = self.menu.list_buttons(self.watcher.current_matches()) if self.menu is not None else None
+            if buttons:
+                self.notifier.send(text + "\n\nTap a time to " +
+                                   ("test booking (no payment)." if self.watcher.bookings.stage == "new" else "book it."),
+                                   buttons=buttons)
+                return None
+            return text
         if command in ("/events", "/watch", "/unwatch"):
             return self._events_command(command, args.strip())
         if looks_like_date_wish(text):

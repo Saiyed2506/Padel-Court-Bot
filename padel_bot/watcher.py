@@ -253,9 +253,15 @@ class Watcher:
                     self.polls.post(slot, text, silent=not slot.preferred)  # only ⭐ times ring
             else:
                 silent = not any(slot.preferred for slot in new_slots)
-                for text in build_messages(new_slots, s.club_name, link, self.clock(), s.free_cancel_min):
+                messages = build_messages(new_slots, s.club_name, link, self.clock(), s.free_cancel_min)
+                menu = getattr(self.commands, "menu", None)
+                buttons = menu.list_buttons(new_slots) if menu is not None else None
+                for i, text in enumerate(messages):
+                    last = i == len(messages) - 1
                     if broadcast is not None:
-                        broadcast(text, silent=silent)
+                        # booking buttons on your copy of the last part only; friends get the plain list
+                        broadcast(text, silent=silent, **({"buttons": buttons, "friend_buttons": None}
+                                                          if last and buttons else {}))
                     else:
                         self.notifier.send(text)
         except NotifyError as exc:
