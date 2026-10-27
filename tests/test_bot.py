@@ -1307,11 +1307,15 @@ class FakeBookingAccount:
         self.confirm_error = None
         self.matches = []
         self.patch_accepts = None       # e.g. lambda body: body == {"selected_payment_method": "MERCHANT_WALLET"}
+        self.share_field = True         # False: the reply only shows the whole-court price
 
     def send(self, method, path, body=None):
         self.calls.append((method, path, body))
         if path == "/v1/payment_intents":
-            return {"payment_intent_id": "pi-1", "price": f"{self.price} EUR", "available_payment_methods": self.methods}
+            intent = {"payment_intent_id": "pi-1", "price": f"{self.price} EUR", "available_payment_methods": self.methods}
+            if self.share_field:
+                intent["amount_to_pay"] = f"{self.price / 4:g} EUR"     # Playtomic says: you pay your share now
+            return intent
         if method == "PATCH":
             self.selected = body.get("selected_payment_method")
             if self.patch_accepts is not None:
@@ -1454,6 +1458,15 @@ class BookingTests(unittest.TestCase):
         out = self.bm.book(self.slot(), "tap")
         self.assertTrue(out.booked, out.text)
         self.assertNotIn("/v1/payment_intents/pi-1/confirmation", [p for _, p, _ in self.acc.calls])
+
+    def test_never_pays_the_whole_court(self):
+        self.acc.share_field = False                         # only price=48 in the reply
+        out = self.bm.book(self.slot(), "tap")
+        self.assertFalse(out.booked)
+        self.assertIn("Playtomic would charge €45 - not just your share (€11.25). Stopped before paying", out.text)
+        self.assertIn("For Claude - money: price=45", out.text)
+        self.assertEqual([m for m, _, _ in self.acc.calls], ["POST"])           # no method chosen, nothing confirmed
+        self.assertIn("money: price=45", self.bm.test(self.slot(day=29)))     # the test shows the amounts too
 
     def test_wallet_refused_then_card(self):
         self.acc.refuse = {"w-1"}

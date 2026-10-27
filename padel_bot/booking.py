@@ -231,6 +231,36 @@ class PlaytomicBooker:
     def price(intent: dict) -> float | None:
         return _amount(_find(intent, ("price", "total_price", "amount", "total")))
 
+    MONEY_WORDS = ("price", "amount", "total", "share", "split", "per_player", "to_pay", "pay_now", "pending")
+
+    @classmethod
+    def amount_fields(cls, data, path: str = "") -> list[tuple[str, float]]:
+        """Every money-looking number in a reply, with where it is (e.g. cart.price=48)."""
+        found = []
+        if isinstance(data, dict):
+            for key, value in data.items():
+                where = f"{path}.{key}" if path else key
+                if isinstance(value, (dict, list)):
+                    found += cls.amount_fields(value, where)
+                elif any(w in key.lower() for w in cls.MONEY_WORDS):
+                    amount = _amount(value)
+                    if amount is not None and "rate" not in key.lower():
+                        found.append((where, amount))
+        elif isinstance(data, list):
+            for i, value in enumerate(data[:5]):
+                found += cls.amount_fields(value, f"{path}[{i}]")
+        return found
+
+    def charged_amount(self, intent: dict) -> float | None:
+        """What Playtomic would take from you now, if the reply says so."""
+        fields = self.amount_fields(intent)
+        for where, amount in fields:  # a field that is clearly 'your part now'
+            if any(w in where.lower() for w in ("to_pay", "pay_now", "per_player", "share", "user_amount")):
+                return amount
+        prices = [amount for where, amount in fields
+                  if where.split(".")[-1] in ("price", "amount", "total", "total_price")]
+        return max(prices) if prices else None
+
     @staticmethod
     def wallet_balance(intent: dict) -> float | None:
         """Club wallet balance, if Playtomic includes it with the payment methods."""
@@ -424,6 +454,7 @@ class BookingManager:
         offered = self.booker.methods(intent)
         usable = self.booker.ordered_methods(intent)
         price = self.booker.price(intent)
+        money = ", ".join(f"{w}={a:g}" for w, a in self.booker.amount_fields(intent))[:400]
         try:
             matches = f"{len(self.booker.my_matches(self.clock().astimezone(timezone.utc)))} upcoming booking(s) found"
         except PlaytomicError as exc:
@@ -444,7 +475,7 @@ class BookingManager:
             "I would pay with: " + (", ".join(METHOD_NAMES.get(t, t) for t, _ in usable) or
                                     "❌ none of your choices (club wallet / card) - booking can't work yet"),
             f"Your bookings check: {matches}",
-            f"(Reply fields for Claude: {', '.join(sorted(intent))[:250]})",
+            f"(For Claude - fields: {', '.join(sorted(intent))[:250]}; money: {money or 'none found'})",
             "",
             "The started booking just expires. If this looks right, the next court alert has a "
             "'💳 Book' button for one real booking.",
@@ -508,6 +539,18 @@ class BookingManager:
         wallet_before = self._note_wallet(intent)
         if price is not None and price > self.rules.max_price_eur:
             raise BookingError(f"Playtomic's price €{price:g} is above your limit of €{self.rules.max_price_eur:g}.")
+        if self.rules.split_payment:
+            # Safety: only ever pay your share. If Playtomic's reply says it would take
+            # the whole court (or doesn't say), stop before choosing a payment method.
+            share = (price or slot.price_eur) / self.rules.players
+            charged = self.booker.charged_amount(intent)
+            if charged is None or charged > share * 1.25:
+                money = ", ".join(f"{w}={a:g}" for w, a in self.booker.amount_fields(intent))[:300]
+                self._log(kind="book", mode=mode, slot=slot.key, stopped="whole court", money=money, intent=intent)
+                raise BookingError(
+                    f"Playtomic would charge {'€%g' % charged if charged is not None else 'an unclear amount'} "
+                    f"- not just your share (€{share:.2f}). Stopped before paying; nothing was paid.\n"
+                    f"For Claude - money: {money or 'none found'}")
         methods = self.booker.ordered_methods(intent)
         if not methods:
             offered = ", ".join(t for t, _ in self.booker.methods(intent)) or "none"
