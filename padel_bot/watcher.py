@@ -307,6 +307,7 @@ class Watcher:
             self._maybe_daily_report()
             if self.sniper is not None:
                 try:
+                    self.sniper.wallet_check()
                     if self.sniper.maybe_fire():
                         continue  # an opening was handled; look again right away
                 except Exception:

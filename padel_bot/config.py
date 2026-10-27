@@ -39,6 +39,7 @@ class BookingSettings:
     auto_min_hours: int = 24             # automatic bookings only this far ahead (free cancellation)
     max_per_day: int = 1                 # bookings by the bot per day of play
     max_per_week: int = 0                # 0 = no weekly limit
+    max_active: int = 0                  # own cap on active bookings; 0 = none (Playtomic enforces its own)
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,7 @@ def _booking(raw: dict) -> BookingSettings:
             auto_min_hours=int(raw.get("auto_min_hours", d.auto_min_hours)),
             max_per_day=int(raw.get("max_per_day", d.max_per_day)),
             max_per_week=int(raw.get("max_per_week", d.max_per_week)),
+            max_active=int(raw.get("max_active", d.max_active)),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"[booking]: {exc}") from None
@@ -224,9 +226,10 @@ def load_settings(config_path: Path, *, require_club: bool = True) -> Settings:
         raise ConfigError('notify.daily_report must look like "08:00" or "off"') from None
 
     events = data.get("events", {})
-    events_minutes = float(events.get("check_every_minutes", 30))
-    if events_minutes < 15:
-        raise ConfigError("events.check_every_minutes must be at least 15")
+    events_minutes = float(events.get("check_every_minutes", 3))
+    if events_minutes < 2:
+        # Each check is a logged-in request; faster than this risks your account.
+        raise ConfigError("events.check_every_minutes must be at least 2")
     events_interval_s = int(events_minutes * 60)
     overview = str(events.get("weekly_overview", "sun 18:00")).strip().lower()
     if overview in ("", "off", "none"):

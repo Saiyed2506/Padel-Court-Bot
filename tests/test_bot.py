@@ -1267,7 +1267,7 @@ class FakeBookingAccount:
     def __init__(self):
         self.calls = []
         self.price = 45
-        self.methods = [{"method_type": "MERCHANT_WALLET", "payment_method_id": "w-1"},
+        self.methods = [{"method_type": "MERCHANT_WALLET", "payment_method_id": "w-1", "balance": {"amount": 20.0}},
                         {"method_type": "CREDIT_CARD", "payment_method_id": "c-9"}]
         self.refuse = set()            # method ids whose PATCH or confirmation is refused
         self.confirm_reply = {"match_id": "m-77", "status": "CONFIRMED"}
@@ -1341,7 +1341,8 @@ class BookingTests(unittest.TestCase):
         self.bm.test(self.slot())
         out = self.bm.book(self.slot(), "tap")
         self.assertTrue(out.booked, out.text)
-        self.assertIn("✅ Booked: Wed 28 Oct 17:00-18:30, Indoor 2, €45 via club wallet", out.text)
+        self.assertIn("✅ BOOKED: Indoor 2 Wed 28 Oct 17:00-18:30 (90 min), your share €11.25 (court €45) "
+                      "via club wallet. Wallet left €8.75. Invite your fellow players", out.text)
         self.assertIn("Free cancellation until Tue 27 Oct 17:00", out.text)
         self.assertIn("https://app.playtomic.com/matches/m-77", out.text)
         self.assertEqual([b for m, _, b in self.acc.calls if m == "PATCH"], [{"selected_payment_method": "w-1"}])
@@ -1350,6 +1351,26 @@ class BookingTests(unittest.TestCase):
         self.assertEqual(self.make().stage, "verified")          # survives a restart
         again = self.bm.book(self.slot(), "tap")
         self.assertIn("already booked", again.text)
+
+    def test_wallet_balance_and_active_limit(self):
+        self.assertIn("Club wallet balance: €20.00", self.bm.test(self.slot()))
+        self.assertEqual(self.bm.state["wallet"]["balance"], 20.0)
+        self.bm.state.update(stage="verified", auto=True)
+        # No own cap: the bot tries; Playtomic's refusal is reported once, then quietly.
+        self.acc.confirm_error = PlaytomicError("HTTP 409: You have exceeded the maximum number of 6 active bookings", status=409)
+        out = self.bm.book(self.slot(day=29), "tap")
+        self.assertIn("❌ Didn't get it: Thu 29 Oct 17:00-18:30, Indoor 2 (HTTP 409: You have exceeded", out.text)
+        self.assertEqual(self.bm.book(self.slot(day=30), "auto").text, "")
+        self.acc.confirm_error = None
+        self.assertTrue(self.bm.book(self.slot(day=31), "auto").booked)
+        self.assertFalse(self.bm.state["limit_notified"])           # next refusal will be reported again
+        # An own cap can still be set in config.toml (max_active):
+        self.s = _replace(self.s, booking=_replace(self.s.booking, max_active=2))
+        self.acc.matches = [{"start_date": "2026-11-05T17:00:00"}, {"start_date": "2026-11-06T17:00:00"}]
+        self.assertIn("Not booked (2/2 active)", self.bm.book(self.slot(day=28), "auto").text)
+        self.acc.matches = self.acc.matches[:1]
+        self.bm.prepare()
+        self.assertIn("You're back at 1 active court booking(s)", self.telegram.sent[-1])
 
     def test_wallet_refused_then_card(self):
         self.acc.refuse = {"w-1"}
@@ -1399,7 +1420,7 @@ class BookingTests(unittest.TestCase):
         self.assertEqual(booked_days, ["2026-10-27", "2026-10-30", "2026-10-31"])
         self.assertEqual(len(results), 2)                          # Tue + Sat; the rest skipped quietly
         self.assertTrue(all(r.booked for r in results))
-        self.assertTrue(all("🤖 Booked automatically" in m for m in self.telegram.sent))
+        self.assertTrue(all("🤖 BOOKED" in m for m in self.telegram.sent))
 
     def test_cannot_check_existing_bookings_means_no_auto(self):
         self.bm.state.update(stage="verified", auto=True)
@@ -1445,7 +1466,7 @@ class BookingMenuTests(MenuBase):
         self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 for €45?", ask["text"])
         self.assertEqual(ask["buttons"][0][0], ("✅ Yes, book €45", f"by:{pid}"))
         self.assertEqual(self.tap(f"by:{pid}"), "Booked ✅")
-        self.assertIn("✅ Booked", self.telegram.edits[-1]["text"])
+        self.assertIn("✅ BOOKED", self.telegram.edits[-1]["text"])
         to_ali = [m for m in self.telegram.outbox if m["chat_id"] == "777" and "Join the match" in m["text"]]
         self.assertEqual(len(to_ali), 1)
         self.tap("st")
@@ -1507,16 +1528,35 @@ class OpeningTests(unittest.TestCase):
             return [avail("c2", "2026-11-10", ("18:30:00", 90, "45 EUR"))]    # 19:30 local
         self.client.get_availability = appears_on_second_try
         self.assertTrue(self.sn.maybe_fire())
-        self.assertEqual(self.slept, [41.0, 3.0])                     # 19:30:01, then 19:30:04
+        self.assertEqual(self.slept, [40.5, 1.0])                     # 19:30:00.5, then 19:30:01.5
         self.assertEqual(self.bm.state["bookings"][0]["day"], "2026-11-10")
-        self.assertIn("⚡ Grabbed at opening (+4s)", self.telegram.sent[-1])
+        self.assertIn("⚡ Grabbed at opening (+1.5s)", self.telegram.sent[-1])
         self.assertFalse(self.sn.maybe_fire())                        # done for this opening
 
     def test_gives_up_after_30s(self):
         self.assertTrue(self.sn.maybe_fire())
-        self.assertEqual(self.slept, [41.0, 3.0, 6.0, 20.0])          # +1, +4, +10, +30 s
-        self.assertIn("no free court appeared", self.telegram.sent[-1])
+        self.assertEqual(self.slept, [40.5, 1.0, 1.5, 3.0, 4.0, 10.0, 10.0])   # +0.5 ... +30 s
+        self.assertIn("👀 Watched Tue 10 Nov 19:30", self.telegram.sent[-1])
+        self.assertIn("never seen free", self.telegram.sent[-1])
         self.assertEqual(self.bm.state["bookings"], [])
+
+    def test_clock_correction(self):
+        self.watcher.client.clock_offset_s = 2.0                       # Playtomic is 2 s ahead of the laptop
+        self.sn.maybe_fire()
+        self.assertEqual(self.slept[0], 38.5)                          # fires at laptop 19:29:58.5 = server 19:30:00.5
+
+    def test_wallet_warning_before_opening(self):
+        self.bm.state["wallet"] = {"balance": 11.84, "at": "2026-10-27T14:02:00+01:00"}
+        self.now = datetime(2026, 10, 27, 17, 0, tzinfo=TZ)
+        self.sn.wallet_check()
+        self.assertIn("💰 Wallet padel amigos: €11.84 (as of Tue 14:02). About €17.50 is needed for Tue 10 Nov 19:30 "
+                      "(opens Tue 19:30)", self.telegram.sent[-1])                  # €70 limit / 4 players
+        self.sn.wallet_check()
+        self.assertEqual(sum("💰" in m for m in self.telegram.sent), 1)              # once a day
+        self.bm.state["wallet"]["balance"] = 30
+        self.sn.wallet_warned = None
+        self.sn.wallet_check()
+        self.assertEqual(sum("💰" in m for m in self.telegram.sent), 1)              # enough: silent
 
     def test_needs_automatic_booking(self):
         self.bm.state["auto"] = False

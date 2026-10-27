@@ -72,6 +72,7 @@ payment_methods = ["MERCHANT_WALLET", "CREDIT_CARD"]   # club wallet first, then
 auto_min_hours = 24           # automatic bookings only if still cancellable for free
 max_per_day = 1               # at most this many bot bookings per day of play
 max_per_week = 0              # 0 = no weekly limit
+max_active = 0                # 0 = no own cap; Playtomic refuses above its limit (6 with Wellpass) and you're told once
 
 [events]
 # Club events, matched by name: group classes (public) and Open Play events
@@ -79,7 +80,7 @@ max_per_week = 0              # 0 = no weekly limit
 # Change the names from Telegram with /watch and /unwatch.
 enabled = true
 watch = ["Newcomer", "Afterwork"]
-check_every_minutes = 30      # new dates appear at random times; minimum 15
+check_every_minutes = 3       # new dates appear at random times; minimum 2 (each check uses your login)
 days_ahead = 120              # how far ahead to look for published dates
 weekly_overview = "sun 18:00" # or "off"
 api_times = "utc"

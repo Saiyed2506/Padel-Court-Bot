@@ -216,12 +216,35 @@ class PlaytomicClient:
         self.user_agent = user_agent
         self.base_url = base_url.rstrip("/")
         self.timeout_s = timeout_s
+        self._offsets: list[float] = []   # Playtomic's clock minus ours, in seconds
+
+    @property
+    def clock_offset_s(self) -> float:
+        """How far your computer's clock is behind Playtomic's (median of recent replies)."""
+        if not self._offsets:
+            return 0.0
+        ordered = sorted(self._offsets)
+        return ordered[len(ordered) // 2]
+
+    def _note_server_time(self, header: str | None) -> None:
+        if not header:
+            return
+        try:
+            from email.utils import parsedate_to_datetime
+
+            server = parsedate_to_datetime(header).timestamp() + 0.5  # header has whole seconds
+        except (TypeError, ValueError):
+            return
+        import time as _time
+
+        self._offsets = (self._offsets + [server - _time.time()])[-9:]
 
     def _fetch(self, url: str, accept: str) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": self.user_agent, "Accept": accept})
         label = urllib.parse.urlparse(url).path
         try:
             with urllib.request.urlopen(request, timeout=self.timeout_s) as response:
+                self._note_server_time(response.headers.get("Date"))
                 return response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             # 429 = slow down, 5xx = their problem: both worth retrying later.

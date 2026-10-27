@@ -165,6 +165,18 @@ class PlaytomicBooker:
     def price(intent: dict) -> float | None:
         return _amount(_find(intent, ("price", "total_price", "amount", "total")))
 
+    @staticmethod
+    def wallet_balance(intent: dict) -> float | None:
+        """Club wallet balance, if Playtomic includes it with the payment methods."""
+        for entry in intent.get("available_payment_methods") or []:
+            if isinstance(entry, dict) and "WALLET" in str(entry.get("method_type") or entry.get("type") or "").upper():
+                value = _find(entry, ("balance", "available_balance", "wallet_balance", "remaining_balance",
+                                      "available_amount", "amount"))
+                found = _amount(value)
+                if found is not None:
+                    return found
+        return None
+
     def my_matches(self, from_utc: datetime) -> list[dict]:
         """Your upcoming Playtomic bookings (so automatic booking avoids days you already play)."""
         reply = self.account.get("/v1/matches", {"owner_id": self.account.user_id, "size": "50",
@@ -210,6 +222,8 @@ class BookingManager:
         self.state.setdefault("stage", "new")      # new -> tested -> verified
         self.state.setdefault("auto", False)
         self.state.setdefault("bookings", [])
+        self.state.setdefault("wallet", None)       # {"balance": 11.84, "at": iso} - last seen
+        self.state.setdefault("at_limit", False)    # at max_active bookings
 
     # --- state -----------------------------------------------------------------
 
@@ -241,6 +255,39 @@ class BookingManager:
         self.state["auto"] = on
         self._save()
         return "🤖 Automatic booking ON" if on else "🤖 Automatic booking off"
+
+    def share(self, price: float) -> float:
+        rules = self.rules
+        return price / rules.players if rules.split_payment else price
+
+    def _note_wallet(self, intent: dict) -> float | None:
+        balance = self.booker.wallet_balance(intent)
+        if balance is not None:
+            self.state["wallet"] = {"balance": balance, "at": self.clock().isoformat()}
+            self._save()
+        return balance
+
+    def note_active(self, count: int) -> None:
+        """Track Playtomic's active-booking limit; say when booking can resume."""
+        limit = self.rules.max_active
+        self.active_count = count
+        if not limit:
+            return  # no own cap: Playtomic decides
+        if count >= limit and not self.state["at_limit"]:
+            self.state["at_limit"] = True
+            self._save()
+        elif count < limit and self.state["at_limit"]:
+            self.state["at_limit"] = False
+            self._save()
+            if self.auto_on:
+                self._say(f"🎾 You're back at {count} active court booking(s) - I'll book automatically again.")
+        self.active_count = count
+
+    def _say(self, text: str, silent: bool = False) -> None:
+        try:
+            self.notifier.send(text, **({"silent": True} if silent else {}))
+        except Exception as exc:
+            log.error("Could not send: %s", exc)
 
     def bookings_on(self, day) -> list[dict]:
         return [b for b in self.state["bookings"] if b["day"] == day.isoformat()]
@@ -284,6 +331,9 @@ class BookingManager:
                 matches = self.booker.my_matches(self.clock().astimezone(timezone.utc))
             except PlaytomicError as exc:
                 return f"Couldn't check your existing Playtomic bookings ({exc}), so I didn't auto-book."
+            self.note_active(len(matches))
+        if self.rules.max_active and len(matches) >= self.rules.max_active:
+            return f"Not booked ({len(matches)}/{self.rules.max_active} active)"
         for match in matches:
             try:
                 start = datetime.fromisoformat(str(match.get("start_date", "")).replace("Z", ""))
@@ -313,6 +363,7 @@ class BookingManager:
         except PlaytomicError as exc:
             matches = f"couldn't read your bookings ({exc})"
         self._log(kind="test", slot=slot.key, intent_keys=sorted(intent), intent=intent)
+        wallet = self._note_wallet(intent)
         if self.stage == "new":
             self.state["stage"] = "tested"
             self._save()
@@ -323,6 +374,7 @@ class BookingManager:
             + (f" (split {self.rules.players} ways: about €{(price or slot.price_eur) / self.rules.players:.2f} each)"
                if self.rules.split_payment else ""),
             "Payment methods offered: " + (", ".join(t for t, _ in offered) or "none listed"),
+            "Club wallet balance: " + (f"€{wallet:.2f}" if wallet is not None else "not shown by Playtomic"),
             "I would pay with: " + (", ".join(METHOD_NAMES.get(t, t) for t, _ in usable) or
                                     "❌ none of your choices (club wallet / card) - booking can't work yet"),
             f"Your bookings check: {matches}",
@@ -339,6 +391,7 @@ class BookingManager:
         """Before an opening: renew the login and read your bookings now, not at the moment."""
         try:
             self._my_cache = (self.clock(), self.booker.my_matches(self.clock().astimezone(timezone.utc)))
+            self.note_active(len(self._my_cache[1]))
         except PlaytomicError as exc:
             self._my_cache = None
             log.warning("Couldn't prepare for the opening: %s", exc)
@@ -369,13 +422,19 @@ class BookingManager:
             self._log(kind="book", mode=mode, slot=slot.key, error=str(exc))
             if isinstance(exc, AuthError):
                 return Outcome(False, f"Not booked: {exc}")
-            return Outcome(False, f"❌ Not booked: {exc}")
+            if "active bookings" in str(exc).lower() or getattr(exc, "status", None) == 409:
+                if self.state.get("limit_notified"):
+                    return Outcome(False, "")  # already told you about Playtomic's limit
+                self.state["limit_notified"] = True
+                self._save()
+            return Outcome(False, f"❌ Didn't get it: {describe_slot(slot)} ({exc})")
         return outcome
 
     def _book(self, slot: Slot, mode: str) -> Outcome:
         intent = self.booker.create_intent(slot)
         intent_id = intent["payment_intent_id"]
         price = self.booker.price(intent)
+        wallet_before = self._note_wallet(intent)
         if price is not None and price > self.rules.max_price_eur:
             raise BookingError(f"Playtomic's price €{price:g} is above your limit of €{self.rules.max_price_eur:g}.")
         methods = self.booker.ordered_methods(intent)
@@ -392,6 +451,8 @@ class BookingManager:
             try:
                 reply = self.booker.confirm(intent_id)
             except PlaytomicError as exc:
+                if exc.status == 409:
+                    raise BookingError(str(exc)) from None  # e.g. too many active bookings: not a payment problem
                 if exc.status is not None and 400 <= exc.status < 500:
                     last_error = exc
                     continue  # payment refused: nothing charged, next method
@@ -400,12 +461,14 @@ class BookingManager:
             if self.booker.needs_action(reply):
                 return Outcome(False, f"💳 Playtomic needs you to confirm the payment ({METHOD_NAMES.get(kind, kind)}). "
                                       "Open the Playtomic app to finish it - the slot may already be held for you.")
-            return self._success(slot, mode, kind, self.booker.match_id(reply), price)
+            return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
         raise BookingError(f"Payment didn't work with any of your methods ({last_error}).")
 
-    def _success(self, slot: Slot, mode: str, method: str, match_id: str, price: float | None) -> Outcome:
+    def _success(self, slot: Slot, mode: str, method: str, match_id: str, price: float | None,
+                 wallet_before: float | None = None) -> Outcome:
         now = self.clock()
         self._my_cache = None  # your bookings just changed
+        self.state["limit_notified"] = False
         self.state["bookings"].append({
             "key": slot.key, "day": slot.start.date().isoformat(), "start": slot.start.isoformat(),
             "court": slot.court_name, "price": price or slot.price_eur, "match_id": match_id,
@@ -417,11 +480,20 @@ class BookingManager:
         self._save()
         rules = self.rules
         deadline = slot.start - timedelta(hours=24)
-        share = (f" With split payment the others pay their share when they join (about "
-                 f"€{(price or slot.price_eur) / rules.players:.2f} each).") if rules.split_payment else ""
+        total = price or slot.price_eur
+        mine = self.share(total)
+        paid = (f"your share €{mine:.2f} (court €{total:g})" if rules.split_payment else f"€{total:g}")
+        wallet_left = ""
+        if method == "MERCHANT_WALLET" and wallet_before is not None:
+            left = wallet_before - mine
+            self.state["wallet"] = {"balance": left, "at": now.isoformat()}
+            self._save()
+            wallet_left = f" Wallet left €{left:.2f}."
         lines = [
-            f"{'🤖 Booked automatically' if mode == 'auto' else '✅ Booked'}: {describe_slot(slot)}, "
-            f"€{(price or slot.price_eur):g} via {METHOD_NAMES.get(method, method)}.{share}",
+            f"{'🤖 BOOKED' if mode == 'auto' else '✅ BOOKED'}: {slot.court_name} {format_day(slot.start)} "
+            f"{format_time(slot.start)}-{format_time(slot.end)} ({slot.duration} min), {paid} via "
+            f"{METHOD_NAMES.get(method, method)}.{wallet_left}"
+            + (" Invite your fellow players in the app now." if rules.split_payment else ""),
             (f"Free cancellation until {format_day(deadline)} {format_time(deadline)} (in the Playtomic app)."
              if deadline > now else "⚠️ Less than 24h ahead - this one can't be cancelled for free."),
         ]
@@ -452,6 +524,8 @@ class BookingManager:
                 continue  # you already play that day
             outcome = self.book(slot, "auto")
             results.append(outcome)
+            if not outcome.text:
+                continue  # nothing new to tell (e.g. Playtomic's limit, already reported)
             try:
                 self.notifier.send(outcome.text)
             except Exception as exc:  # NotifyError - the booking itself is done

@@ -27,6 +27,20 @@ APP_API = "https://api.app.playtomic.io"
 ROLES = ["ROLE_CUSTOMER"]  # what the app asks for on login and refresh
 
 
+def readable_error(body: str) -> str:
+    """Playtomic's own error sentence if there is one, e.g. 'You have exceeded the
+    maximum number of 6 active bookings and matches allowed'."""
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return " ".join(body.split())[:200]
+    if isinstance(data, dict):
+        for key in ("localized_message", "message", "error_description", "error", "status"):
+            if isinstance(data.get(key), str) and data[key].strip():
+                return data[key].strip()[:200]
+    return " ".join(body.split())[:200]
+
+
 class AuthError(PlaytomicError):
     """The login is missing or no longer accepted; you need to log in again."""
 
@@ -95,8 +109,8 @@ class PlaytomicAccount:
         except urllib.error.HTTPError as exc:
             retryable = exc.code == 429 or exc.code >= 500
             # Playtomic's error text helps when a booking is refused (e.g. "slot not available").
-            detail = exc.read().decode("utf-8", "replace")[:300].replace("\n", " ") if method != "POST" or "auth" not in path else ""
-            raise PlaytomicError(f"HTTP {exc.code} for {path}" + (f": {detail}" if detail else ""),
+            detail = exc.read().decode("utf-8", "replace")[:500] if method != "POST" or "auth" not in path else ""
+            raise PlaytomicError(f"HTTP {exc.code}" + (f": {readable_error(detail)}" if detail else f" for {path}"),
                                  status=exc.code, retryable=retryable) from None
         except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
             raise PlaytomicError(f"network error for {path}: {getattr(exc, 'reason', exc)}") from None
