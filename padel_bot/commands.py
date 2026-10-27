@@ -14,17 +14,18 @@ from typing import Callable
 
 from .notify import NotifyError, booking_link, build_messages
 from .playtomic import PlaytomicError
-from .wishes import MAX_WISHES, WishError, WishStore, describe, parse_wish
+from .wishes import MAX_WISHES, WishError, WishStore, describe, looks_like_date_wish, parse_wish
 
 log = logging.getLogger("padel_bot")
 
 HELP = """🎾 Padel bot commands  (or tap 🎾 Menu for buttons)
 
 /wishes - show what I'm watching
-/wish <days> <time> - add a wish, e.g.
-   /wish tue 17:00   (exactly 17:00, 90 min)
-   /wish weekend 09:30-12:30   (any game inside)
-   /wish mon-fri 16:00-20:30 prefer 16:30,17:00
+/wish <days or date> <time> - add a wish, e.g.
+   10.11.2026 16:00-19:30   (that date, any start 16:00-19:30, 90 min)
+   /wish tue 17:00   (every Tuesday, exactly 17:00)
+   /wish weekend 09:30-11:00   (any start 09:30-11:00)
+   /wish mon-fri 16:00-19:00 prefer 16:30,17:00
    /wish sat 10:00 120   (120-minute game)
    days: mon..sun, mon-fri, sat,sun, weekdays, weekend
 /remove <number> - delete a wish (see /wishes)
@@ -129,11 +130,11 @@ class CommandCenter:
             return self.wishes_text()
         if command == "/wish":
             if not args:
-                return "Example: /wish tue 17:00  or  /wish weekend 09:30-12:30\n(/help for more)"
+                return "Example: 10.11.2026 16:00-19:30  or  /wish tue 17:00\n(/help for more)"
             if len(windows) >= MAX_WISHES:
                 return f"That's {MAX_WISHES} wishes already - /remove one first."
             try:
-                window = parse_wish(args)
+                window = parse_wish(args, self.watcher.clock().date())
             except WishError as exc:
                 return f"🤔 {exc}"
             if window in windows:
@@ -166,6 +167,8 @@ class CommandCenter:
             return self._now_text()
         if command in ("/events", "/watch", "/unwatch"):
             return self._events_command(command, args.strip())
+        if looks_like_date_wish(text):
+            return self.handle(f"/wish {text}")  # "10.11.2026 16:00-19:30" works without /wish
         return "I only understand commands. Send /help to see them."
 
     def _events_command(self, command: str, args: str) -> str:

@@ -475,13 +475,26 @@ class WishTests(unittest.TestCase):
         self.assertEqual((exact.start_min, exact.end_min, exact.durations), (17 * 60, 18 * 60 + 30, frozenset({90})))
         self.assertEqual(exact.preferred_starts, frozenset({17 * 60}))
         self.assertEqual(describe(exact), "Tue 17:00-18:30, 90 min")
-        ranged = parse_wish("mon-fri 16:00-20:30 prefer 16:30,17:00")
+        ranged = parse_wish("mon-fri 16:00-19:00 prefer 16:30,17:00")
         self.assertEqual(describe(ranged), "Mon-Fri 16:00-20:30 (starts 16:00-19:00), 90 min, ⭐ 16:30 17:00")
         self.assertEqual(parse_wish("sat 10:00 120").durations, frozenset({120}))
-        for bad in ("tue", "xyz 17:00", "tue 25:00", "tue 17:00-17:30", "tue 17:00 abc",
-                    "mon 16:00-18:00 prefer 17:30", "sun 23:30"):
+        for bad in ("tue", "xyz 17:00", "tue 25:00", "tue 19:00-17:00", "tue 17:00 abc",
+                    "mon 16:00-17:00 prefer 17:30", "sun 23:30", "31.02.2026 16:00", "01.01.2020 16:00"):
             with self.assertRaises(WishError, msg=bad):
                 parse_wish(bad)
+
+    def test_date_wish(self):
+        from padel_bot.wishes import describe, looks_like_date_wish, parse_wish
+        today = date(2026, 10, 27)
+        for text in ("10.11.2026 16:00-19:30", "10.11.2026 between 16:00 - 19:30", "10.11. 16:00 bis 19:30",
+                     "2026-11-10 16:00-19:30"):
+            w = parse_wish(text, today)
+            self.assertEqual((w.on_date, w.start_min, w.end_min), (date(2026, 11, 10), 16 * 60, 21 * 60), text)
+        self.assertEqual(describe(parse_wish("10.11.2026 16:00-19:30", today)),
+                         "Tue 10 Nov (once) 16:00-21:00 (starts 16:00-19:30), 90 min")
+        self.assertEqual(parse_wish("05.01 10:00", today).on_date, date(2027, 1, 5))   # next January
+        self.assertTrue(looks_like_date_wish("10.11.2026 16:00-19:30"))
+        self.assertFalse(looks_like_date_wish("hello 10.11"))
 
     def test_wish_store_round_trip(self):
         from padel_bot.wishes import WishStore, parse_wish
@@ -561,6 +574,10 @@ class CommandTests(unittest.TestCase):
         self.cc.handle("/wish mon 19:30")
         self.assertEqual(len(self.watcher.run_round()), 1)
         self.assertIn("19:30-21:00", self.cc.handle("/now"))
+
+    def test_plain_date_message_adds_one_time_wish(self):
+        reply = self.cc.handle("28.10.2026 between 18:00 - 19:30")
+        self.assertIn("Added: Wed 28 Oct (once) 18:00-21:00 (starts 18:00-19:30), 90 min", reply)
 
     def test_pause_resume_status(self):
         self.assertIn("Paused", self.cc.handle("/pause"))

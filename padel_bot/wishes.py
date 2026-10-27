@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 from datetime import date, datetime
@@ -63,16 +64,55 @@ def parse_days(text: str) -> frozenset[str]:
     return frozenset(days)
 
 
-def parse_wish(text: str) -> Window:
-    """'<days> <HH:MM>[-HH:MM] [<minutes>] [prefer HH:MM,HH:MM]' -> Window.
+_DATE = re.compile(r"^(\d{1,2})\.(\d{1,2})\.?(\d{2,4})?$")
 
-    One time = exactly that start (and it's starred). A range = any game that
-    fits completely inside it.
+
+def parse_date(token: str, today: date) -> date | None:
+    """'10.11.2026', '10.11.', '10.11' or '2026-11-10' -> date; None if it isn't a date."""
+    m = _DATE.match(token)
+    try:
+        if m:
+            day, month, year = int(m.group(1)), int(m.group(2)), m.group(3)
+            if year:
+                found = date(int(year) + (2000 if len(year) == 2 else 0), month, day)
+            else:
+                found = date(today.year, month, day)
+                if found < today:
+                    found = date(today.year + 1, month, day)
+            return found
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", token):
+            return date.fromisoformat(token)
+    except ValueError:
+        raise WishError(f"{token} isn't a real date") from None
+    return None
+
+
+def looks_like_date_wish(text: str) -> bool:
+    first = text.strip().split(maxsplit=1)[0] if text.strip() else ""
+    return bool(_DATE.match(first) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", first))
+
+
+def parse_wish(text: str, today: date | None = None) -> Window:
+    """'<days or date> <HH:MM>[-HH:MM] [<minutes>] [prefer HH:MM,HH:MM]' -> Window.
+
+    One time = exactly that start (and it's starred). A range = any START time
+    inside it, e.g. 16:00-19:30 with 90 min = games starting 16:00 ... 19:30.
+    A date (10.11.2026) makes it a one-time wish for that day.
     """
+    today = today or date.today()
+    # Friendly forms: "between 16:00 and 19:30", "16:00 - 19:30", "16:00 bis 19:30"
+    text = re.sub(r"\b(between|zwischen|from|von|at|um)\b", " ", text, flags=re.I)
+    text = re.sub(r"\s*(?:-|–|\band\b|\bbis\b|\bto\b|\bund\b)\s*(?=\d)", "-", text, flags=re.I)
     words = text.split()
     if len(words) < 2:
-        raise WishError("example: /wish tue 17:00  or  /wish weekend 09:30-12:30")
-    days = parse_days(words[0])
+        raise WishError("example: /wish tue 17:00  or  /wish 10.11.2026 16:00-19:30")
+    on_date = parse_date(words[0], today)
+    if on_date is not None:
+        if on_date < today:
+            raise WishError(f"{on_date.strftime('%d.%m.%Y')} is in the past")
+        days = frozenset(DAY_KEYS)
+    else:
+        days = parse_days(words[0])
     times = words[1]
     rest = words[2:]
 
@@ -98,23 +138,23 @@ def parse_wish(text: str) -> Window:
 
     try:
         if "-" in times:
-            start_text, end_text = times.split("-", 1)
-            start, end = parse_hhmm(start_text), parse_hhmm(end_text)
+            first_text, last_text = times.split("-", 1)
+            start, last_start = parse_hhmm(first_text), parse_hhmm(last_text)
         else:
-            start = parse_hhmm(times)
-            end = start + duration
+            start = last_start = parse_hhmm(times)
             preferred.add(start)
     except ValueError:
-        raise WishError(f"can't read the time {times!r}; use HH:MM like 17:00 or 16:00-20:30") from None
+        raise WishError(f"can't read the time {times!r}; use HH:MM like 17:00 or 16:00-19:30") from None
+    if last_start < start:
+        raise WishError(f"{hhmm(start)}-{hhmm(last_start)}: the second time must be later")
+    end = last_start + duration
     if end > 24 * 60:
         raise WishError("the game has to end by midnight")
-    if end - start < duration:
-        raise WishError(f"{hhmm(start)}-{hhmm(end)} is too short for a {duration}-minute game")
-    outside = [p for p in preferred if not start <= p <= end - duration]
+    outside = [p for p in preferred if not start <= p <= last_start]
     if outside:
-        raise WishError(f"preferred time {hhmm(outside[0])} isn't a possible start in {hhmm(start)}-{hhmm(end)}")
+        raise WishError(f"preferred time {hhmm(outside[0])} isn't a start between {hhmm(start)} and {hhmm(last_start)}")
     return Window(days=days, start_min=start, end_min=end, durations=frozenset({duration}),
-                  preferred_starts=frozenset(preferred))
+                  preferred_starts=frozenset(preferred), on_date=on_date)
 
 
 def describe_days(days: frozenset[str]) -> str:
