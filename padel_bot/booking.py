@@ -276,10 +276,14 @@ class BookingManager:
 
     def _check_my_day(self, slot: Slot) -> str | None:
         """For automatic booking: skip days you already play (any booking in Playtomic)."""
-        try:
-            matches = self.booker.my_matches(self.clock().astimezone(timezone.utc))
-        except PlaytomicError as exc:
-            return f"Couldn't check your existing Playtomic bookings ({exc}), so I didn't auto-book."
+        cache = getattr(self, "_my_cache", None)
+        if cache is not None and (self.clock() - cache[0]).total_seconds() < 600:
+            matches = cache[1]
+        else:
+            try:
+                matches = self.booker.my_matches(self.clock().astimezone(timezone.utc))
+            except PlaytomicError as exc:
+                return f"Couldn't check your existing Playtomic bookings ({exc}), so I didn't auto-book."
         for match in matches:
             try:
                 start = datetime.fromisoformat(str(match.get("start_date", "")).replace("Z", ""))
@@ -331,13 +335,25 @@ class BookingManager:
 
     # --- stages 2 and 3: book ------------------------------------------------------------
 
-    def book(self, slot: Slot, mode: str) -> Outcome:
-        """mode 'tap' (you confirmed) or 'auto'. Never raises; returns a message."""
+    def prepare(self) -> None:
+        """Before an opening: renew the login and read your bookings now, not at the moment."""
+        try:
+            self._my_cache = (self.clock(), self.booker.my_matches(self.clock().astimezone(timezone.utc)))
+        except PlaytomicError as exc:
+            self._my_cache = None
+            log.warning("Couldn't prepare for the opening: %s", exc)
+
+    def book(self, slot: Slot, mode: str, fast: bool = False) -> Outcome:
+        """mode 'tap' (you confirmed) or 'auto'. Never raises; returns a message.
+
+        fast=True (at an opening): the slot was just read as free, and your
+        bookings were read in prepare(), so no extra requests before booking.
+        """
         auto = mode == "auto"
         reason = self.refuse_reason(slot, auto=auto)
         if not reason and auto:
             reason = self._check_my_day(slot)
-        if not reason and self.slot_still_free is not None and not self.slot_still_free(slot):
+        if not reason and not fast and self.slot_still_free is not None and not self.slot_still_free(slot):
             reason = "Someone else just booked it."
         if reason:
             return Outcome(False, f"Not booked: {reason}")
@@ -389,6 +405,7 @@ class BookingManager:
 
     def _success(self, slot: Slot, mode: str, method: str, match_id: str, price: float | None) -> Outcome:
         now = self.clock()
+        self._my_cache = None  # your bookings just changed
         self.state["bookings"].append({
             "key": slot.key, "day": slot.start.date().isoformat(), "start": slot.start.isoformat(),
             "court": slot.court_name, "price": price or slot.price_eur, "match_id": match_id,

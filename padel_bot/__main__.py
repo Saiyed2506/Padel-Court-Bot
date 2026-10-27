@@ -22,6 +22,7 @@ from .account import PlaytomicAccount
 from .commands import CommandCenter
 from .events import EventWatcher, EventWords
 from .friends import Broadcaster, Friends
+from .opening import OpeningSniper
 from .polls import Polls
 from .reminders import Reminders
 from .menu import MENU_BUTTON, RuntimeSettings
@@ -204,6 +205,8 @@ def cmd_run(args, settings: Settings) -> int:
         lambda: watcher.settings, PlaytomicBooker(account, club.tenant_id, settings.booking),
         home / "bookings_state.json", home / "bookings_log.jsonl", notifier, tz, watcher.clock,
         slot_still_free=watcher.slot_still_free, reminders=watcher.reminders)
+    watcher.sniper = OpeningSniper(watcher, watcher.bookings, days_ahead=settings.days_ahead)
+    runtime.apply(watcher)  # again, now that the sniper exists (its on/off is saved there)
     if settings.telegram_commands:
         watcher.commands = CommandCenter(watcher, notifier, store, friends=friends, runtime=runtime)
         watcher.commands.register_menu()

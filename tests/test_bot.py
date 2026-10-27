@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace as _replace
 
 import tempfile
 import unittest
@@ -1450,3 +1451,78 @@ class BookingMenuTests(MenuBase):
         self.tap("st")
         self.assertIn("🤖 Automatic booking: off", self.labels())
         self.assertIn("ON", self.tap("sa"))
+
+
+class OpeningTests(unittest.TestCase):
+    def setUp(self):
+        from padel_bot.booking import BookingManager, PlaytomicBooker
+        from padel_bot.opening import OpeningSniper
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp = Path(self.tmp.name)
+        self.s = settings(tmp)
+        self.now = datetime(2026, 10, 27, 19, 29, 20, tzinfo=TZ)   # Tuesday, 40 s before 19:30
+        self.client = FakeClient()
+        self.telegram = FakeNotifier()
+        self.telegram.chat_id = "42"
+        self.watcher = Watcher(self.s, self.client, CLUB, self.telegram, SeenState(self.s.state_file), TZ,
+                               clock=lambda: self.now, sleep=lambda s: None)
+        self.acc = FakeBookingAccount()
+        self.bm = BookingManager(lambda: self.watcher.settings, PlaytomicBooker(self.acc, "T1", self.s.booking),
+                                 tmp / "bs.json", tmp / "bl.jsonl", self.telegram, TZ, lambda: self.now,
+                                 slot_still_free=lambda slot: self.fail("fast path must not re-check"))
+        self.bm.state.update(stage="verified", auto=True)
+        self.slept = []
+
+        def sleep(seconds):
+            self.slept.append(round(seconds, 1))
+            self.now += timedelta(seconds=seconds)
+        self.sn = OpeningSniper(self.watcher, self.bm, days_ahead=14, sleep=sleep)
+        self.sn.enabled = True
+        self.watcher.sniper = self.sn
+        from padel_bot.wishes import parse_wish
+        self.watcher.settings = _replace(self.s, windows=(parse_wish("mon-fri 16:00-19:30 prefer 19:30", date(2026, 10, 27)),
+                                                           parse_wish("weekend 09:30-11:00", date(2026, 10, 27))))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_openings_follow_wishes(self):
+        ops = self.sn.openings(datetime(2026, 10, 27, 8, 0, tzinfo=TZ), hours=48)
+        got = [(o.at.strftime("%a %H:%M"), o.day.isoformat(), o.start_min) for o in ops]
+        self.assertEqual(got[0], ("Tue 19:30", "2026-11-10", 19 * 60 + 30))      # only the ⭐ time on weekdays
+        self.assertIn(("Wed 19:30", "2026-11-11", 19 * 60 + 30), got)
+        # Saturdays/Sundays 14 days ahead open on Saturdays/Sundays: none within these 48 h (Tue-Thu)
+        self.assertFalse(any(o.day.weekday() >= 5 for o in ops))
+        weekend = self.sn.openings(datetime(2026, 10, 31, 8, 0, tzinfo=TZ), hours=4)
+        self.assertEqual([(o.at.strftime("%H:%M"), o.day.isoformat()) for o in weekend],
+                         [("09:30", "2026-11-14"), ("10:00", "2026-11-14"), ("10:30", "2026-11-14"), ("11:00", "2026-11-14")])
+
+    def test_grabs_slot_when_it_appears(self):
+        calls = {"n": 0}
+        real = self.client.get_availability
+        def appears_on_second_try(tenant, day):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                return []
+            return [avail("c2", "2026-11-10", ("18:30:00", 90, "45 EUR"))]    # 19:30 local
+        self.client.get_availability = appears_on_second_try
+        self.assertTrue(self.sn.maybe_fire())
+        self.assertEqual(self.slept, [41.0, 3.0])                     # 19:30:01, then 19:30:04
+        self.assertEqual(self.bm.state["bookings"][0]["day"], "2026-11-10")
+        self.assertIn("⚡ Grabbed at opening (+4s)", self.telegram.sent[-1])
+        self.assertFalse(self.sn.maybe_fire())                        # done for this opening
+
+    def test_gives_up_after_30s(self):
+        self.assertTrue(self.sn.maybe_fire())
+        self.assertEqual(self.slept, [41.0, 3.0, 6.0, 20.0])          # +1, +4, +10, +30 s
+        self.assertIn("no free court appeared", self.telegram.sent[-1])
+        self.assertEqual(self.bm.state["bookings"], [])
+
+    def test_needs_automatic_booking(self):
+        self.bm.state["auto"] = False
+        self.assertIsNone(self.sn.next_opening(self.now))
+        self.assertFalse(self.sn.maybe_fire())
+
+    def test_wakes_up_in_time(self):
+        early = datetime(2026, 10, 27, 19, 0, tzinfo=TZ)
+        self.assertEqual(self.sn.seconds_until_prepare(early), 30 * 60 - 40)

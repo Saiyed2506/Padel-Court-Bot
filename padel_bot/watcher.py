@@ -52,6 +52,7 @@ class Watcher:
         self.state = state
         self.tz = tz
         self.bookings = None  # a BookingManager when booking is set up (booker arg is unused)
+        self.sniper = None    # ⚡ book at opening (OpeningSniper)
         self.clock = clock or (lambda: datetime.now(tz))
         self.sleep = sleep
         self.rng = rng or random.Random()
@@ -304,6 +305,12 @@ class Watcher:
         while True:
             now = self.clock()
             self._maybe_daily_report()
+            if self.sniper is not None:
+                try:
+                    if self.sniper.maybe_fire():
+                        continue  # an opening was handled; look again right away
+                except Exception:
+                    log.exception("Opening booking failed")
             if self.reminders is not None:
                 try:
                     self.reminders.due(now, silent=in_quiet_hours(now, self.settings.quiet_hours))
@@ -315,6 +322,10 @@ class Watcher:
                 continue
             if in_quiet_hours(now, self.settings.quiet_hours):
                 wait = seconds_until_quiet_end(now, self.settings.quiet_hours)
+                if self.sniper is not None:
+                    until = self.sniper.seconds_until_prepare(now)
+                    if until is not None:
+                        wait = max(1.0, min(wait, until))
                 log.info("Quiet hours - sleeping %.0f minutes", wait / 60)
                 self.check_requested = False
                 self.wait(min(wait + self.rng.uniform(0, 120), 1800))  # re-evaluate at least every 30 min
@@ -333,5 +344,9 @@ class Watcher:
                 except Exception:
                     log.exception("Unexpected error while checking events")
             wait = self.next_sleep_s()
+            if self.sniper is not None:
+                until = self.sniper.seconds_until_prepare(self.clock())
+                if until is not None:
+                    wait = max(1.0, min(wait, until))  # wake up in time for the next opening
             log.info("Next check in %.1f minutes", wait / 60)
             self.wait(wait)

@@ -203,6 +203,35 @@ Every morning at 08:00 a **☀️ check-in** tells you the bot is alive (checks,
 alerts, errors). If it doesn't come, the bot isn't running. Change or turn
 off under ⚙️ Settings.
 
+## Booking (💳, 🤖, ⚡)
+
+Needs your Playtomic login (`/login`). Unlocked step by step:
+
+1. **🧪 Test booking** (button on a court alert): starts a booking but does
+   not confirm it - shows price and payment options. Nothing is paid.
+2. **💳 Book** → **✅ Yes, book**: one real booking with your tap.
+3. **🤖 Automatic booking** (⚙️ Settings): books new matching slots by itself.
+4. **⚡ Book at opening** (⚙️ Settings): courts open 14 days ahead, every
+   30 minutes (today 19:30 → the 19:30 slot in 14 days). The bot prepares
+   ~40 s before each opening that matches a wish and books at +1 s; if the
+   slot isn't visible yet it retries at +4, +10, +30 s. With ⭐ times, only
+   those are grabbed.
+
+Rules (`[booking]` in config.toml): max €70 per court, 1 bot booking per day
+of play, club wallet first then card, split payment, automatic only ≥24h
+ahead and not on days you already play, never the same slot twice. Payments
+needing bank confirmation stop with a message; unclear outcomes are never
+retried and pause automatic booking. All attempts: `bookings_log.jsonl`.
+
+Risk: this uses Playtomic's undocumented app API with your account and
+money. Booking automatically - especially at the exact opening second - is
+easy for Playtomic to notice and could get your account restricted.
+
+## Wishes by date
+
+Send e.g. `10.11.2026 16:00-19:30`: that date only, any start between
+16:00 and 19:30, 90 minutes. Ranges always mean start times.
+
 ## Telling the bot your wishes (Telegram commands)
 
 While `run-bot.bat` is running, send these to your bot in Telegram (or tap the

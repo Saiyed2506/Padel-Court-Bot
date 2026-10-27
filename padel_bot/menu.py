@@ -84,6 +84,8 @@ class RuntimeSettings:
             changes["daily_report_min"] = parse_hhmm(data["daily_report"]) if data["daily_report"] else None
         if changes:
             watcher.settings = replace(watcher.settings, **changes)
+        if getattr(watcher, "sniper", None) is not None:
+            watcher.sniper.enabled = bool(data.get("snipe", False))
         today = watcher.clock().date()
         watcher.muted_days = {d for d in (date.fromisoformat(x) for x in data.get("muted_days", [])) if d >= today}
 
@@ -143,7 +145,7 @@ class Menu:
             "sq": self._cycle_quiet, "sl": self._login, "slo": self._logout,
             "sb": self._cycle_buffer, "sr": self._toggle_report,
             "md": self._mute_day, "um": self._unmute_day, "rb": self._remove_booking,
-            "bt": self._test_booking, "bb": self._ask_booking, "by": self._do_booking, "sa": self._toggle_auto,
+            "so2": self._toggle_snipe, "bt": self._test_booking, "bb": self._ask_booking, "by": self._do_booking, "sa": self._toggle_auto,
         }.get(key)
         if handler is None:
             return "This button is from an older version - tap 🎾 Menu."
@@ -452,6 +454,9 @@ class Menu:
             label = {"verified": "ON" if w.bookings.auto_on else "off",
                      "tested": "🔒 book once with a tap first", "new": "🔒 test + book once first"}[w.bookings.stage]
             rows_booking = [[(f"🤖 Automatic booking: {label}", "sa")]]
+            if w.sniper is not None:
+                snipe = ("ON" if w.sniper.enabled else "off") if w.bookings.auto_on else "🔒 needs 🤖 automatic"
+                rows_booking.append([(f"⚡ Book at opening (beat others): {snipe}", "so2")])
         else:
             rows_booking = []
         notice = w.settings.min_notice_min // 60
@@ -597,6 +602,19 @@ class Menu:
                 continue
             self._tell(chat_id, f"🎾 Booked: {poll.get('label', 'the court')}. "
                                 f"Join the match in Playtomic and pay your share.\n{link}".strip())
+
+    def _toggle_snipe(self, arg, mid):
+        sniper, bookings = self.watcher.sniper, self.watcher.bookings
+        if sniper is None or bookings is None:
+            return "Not available"
+        if not bookings.auto_on:
+            return "🔒 Switch on 🤖 automatic booking first"
+        sniper.enabled = not sniper.enabled
+        self.runtime.update(snipe=sniper.enabled)
+        self._go_settings("", mid)
+        nxt = sniper.next_opening(self.watcher.clock())
+        when = f" Next: {nxt.at.strftime('%a %H:%M')} for {nxt.day.strftime('%d.%m.')} {hhmm(nxt.start_min)}." if nxt else ""
+        return ("⚡ Booking at opening ON." + when) if sniper.enabled else "⚡ Booking at opening off"
 
     def _toggle_auto(self, arg, mid):
         bookings = self.watcher.bookings
