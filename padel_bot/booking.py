@@ -509,7 +509,7 @@ class BookingManager:
             self._my_cache = None
             log.warning("Couldn't prepare for the opening: %s", exc)
 
-    def book(self, slot: Slot, mode: str, fast: bool = False) -> Outcome:
+    def book(self, slot: Slot, mode: str, fast: bool = False, method: str | None = None) -> Outcome:
         """mode 'tap' (you confirmed) or 'auto'. Never raises; returns a message.
 
         fast=True (at an opening): the slot was just read as free, and your
@@ -529,7 +529,7 @@ class BookingManager:
         if reason:
             return Outcome(False, f"Not booked: {reason}")
         try:
-            outcome = self._book(slot, mode)
+            outcome = self._book(slot, mode, method)
         except UnclearOutcome as exc:
             self.state["auto"] = False  # stop automatic booking until you've looked
             self._save()
@@ -548,7 +548,8 @@ class BookingManager:
             return Outcome(False, f"❌ Didn't get it: {describe_slot(slot)} ({exc})")
         return outcome
 
-    def _book(self, slot: Slot, mode: str) -> Outcome:
+    def _book(self, slot: Slot, mode: str, chosen: str | None = None) -> Outcome:
+        """chosen: a payment method you picked yourself on the confirmation screen."""
         intent = self.booker.create_intent(slot)
         intent_id = intent["payment_intent_id"]
         price = self.booker.price(intent)
@@ -556,8 +557,22 @@ class BookingManager:
         if price is not None and price > self.rules.max_price_eur:
             raise BookingError(f"Playtomic's price €{price:g} is above your limit of €{self.rules.max_price_eur:g}.")
         methods = self.booker.ordered_methods(intent)
+        if chosen:
+            methods = [m for m in self.booker.methods(intent) if m[0] == chosen]
+            if not methods:
+                raise BookingError(f"Playtomic doesn't offer {METHOD_NAMES.get(chosen, chosen)} for this booking.")
         probe = None
-        if self.rules.split_payment and not self.state.get("share_verified"):
+        unverified_card = False
+        if chosen == "CREDIT_CARD" and self.rules.split_payment and not self.state.get("share_verified"):
+            # You picked the card yourself on the confirmation screen (which warned you):
+            # go ahead, but say clearly that the amount must be checked in the app.
+            labelled = self.booker.explicit_share(intent)
+            share = (price or slot.price_eur) / self.rules.players
+            if labelled is not None and labelled > share * 1.25:
+                raise BookingError(f"Playtomic would charge €{labelled:g} - not just your share (€{share:.2f}). "
+                                   "Stopped before paying; nothing was paid.")
+            unverified_card = labelled is None
+        elif self.rules.split_payment and not self.state.get("share_verified"):
             # Safety: only ever pay your share. Until a booking has shown that Playtomic
             # takes only your share, pay with the club wallet only - and only while it
             # holds more than your share but less than the whole court, so a whole-court
@@ -629,7 +644,11 @@ class BookingManager:
             if probe is not None:
                 self.state["share_probe"] = probe
                 self._save()
-            return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
+            outcome = self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
+            if unverified_card:
+                outcome.text += ("\n\n💳 Paid by card: please check in the Playtomic app whether only your share "
+                                 "was charged (the bot can't see card amounts).")
+            return outcome
         shapes = self.booker.method_shapes(intent)
         self._log(kind="book", mode=mode, slot=slot.key, trace=trace, method_shapes=shapes)
         raise BookingError("Payment didn't work with any of your methods. Nothing was paid.\n"

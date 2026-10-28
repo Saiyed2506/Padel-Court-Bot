@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from .config import Window
 from .timeutil import DAY_KEYS, format_day, parse_hhmm
@@ -206,6 +206,26 @@ def _from_json(raw: dict) -> Window:
         preferred_starts=frozenset(parse_hhmm(p) for p in raw.get("preferred_starts", [])),
         on_date=date.fromisoformat(raw["date"]) if raw.get("date") else None,
     )
+
+
+def soon_warning(window: Window, now: datetime, free_cancel_min: int) -> str:
+    """A note if the wish covers games starting within the free-cancellation limit."""
+    if not free_cancel_min:
+        return ""
+    limit = now + timedelta(minutes=free_cancel_min)
+    duration = min(window.durations)
+    day = now.date()
+    while day <= limit.date():
+        applies = window.on_date == day if window.on_date else DAY_KEYS[day.weekday()] in window.days
+        if applies:
+            for start in range(window.start_min, window.end_min - duration + 1, 30):
+                at = datetime(day.year, day.month, day.day, start // 60, start % 60, tzinfo=now.tzinfo)
+                if now < at < limit:
+                    hours = free_cancel_min // 60
+                    return (f"\n\n⚠️ Some of these times start in less than {hours}h - those can't be cancelled "
+                            "for free. Booking them always asks you first; automatic booking skips them.")
+        day += timedelta(days=1)
+    return ""
 
 
 def drop_past(windows, today: date) -> tuple[Window, ...]:

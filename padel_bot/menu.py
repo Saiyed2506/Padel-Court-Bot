@@ -17,7 +17,7 @@ from pathlib import Path
 from .config import Window
 from .notify import NotifyError
 from .timeutil import DAY_KEYS, format_day, parse_hhmm
-from .wishes import MAX_WISHES, describe, drop_past, hhmm
+from .wishes import MAX_WISHES, describe, drop_past, hhmm, soon_warning
 
 log = logging.getLogger("padel_bot")
 
@@ -342,7 +342,8 @@ class Menu:
         if window not in windows:
             self.center.set_windows(windows + [window])
         self.flow = {}
-        self._screen(mid, f"✅ Added: {describe(window)}\nI'll check it in a moment.\n\n{self._wishes_text()}",
+        note = soon_warning(window, self.watcher.clock(), self.watcher.settings.free_cancel_min)
+        self._screen(mid, f"✅ Added: {describe(window)}\nI'll check it in a moment.{note}\n\n{self._wishes_text()}",
                      self._wish_buttons())
         return "Added"
 
@@ -651,24 +652,38 @@ class Menu:
         if reason:
             return reason[:190]
         rules = bookings.rules
-        warn = cancel_warning(slot.start, self.watcher.clock(), self.watcher.settings.free_cancel_min)
-        split = (f"\nSplit payment: others pay their share (about €{slot.price_eur / rules.players:.2f} each) "
-                 "when they join." if rules.split_payment else "")
-        text = (f"💳 Book {describe_slot(slot)} (or another free court at that time) for €{slot.price_eur:g}?{split}\n"
-                f"Payment: {' → '.join(m.replace('MERCHANT_WALLET', 'club wallet').replace('CREDIT_CARD', 'card').lower() for m in rules.payment_methods)}"
-                f"{chr(10) + warn.strip() if warn else ''}")
-        self.notifier.send(text, buttons=[[(f"✅ Yes, book €{slot.price_eur:g}", f"by:{arg}"), ("✖ No", "bn")]])
+        now = self.watcher.clock()
+        hours = self.watcher.settings.free_cancel_min // 60
+        late = (slot.start - now).total_seconds() < self.watcher.settings.free_cancel_min * 60
+        share = slot.price_eur / rules.players if rules.split_payment else slot.price_eur
+        lines = [f"💳 Book {describe_slot(slot)} (or another free court at that time)?",
+                 f"Court €{slot.price_eur:g}" + (f" - your share about €{share:.2f}, the others pay theirs when they join."
+                                                  if rules.split_payment else ".")]
+        if late:
+            lines.append(f"\n⚠️ Starts in less than {hours}h - you can NOT cancel it for free. "
+                         "Only book if you're sure.")
+        if rules.split_payment and not bookings.state.get("share_verified"):
+            lines.append("\nNot verified yet that Playtomic takes only your share:\n"
+                         "• club wallet: safe - if it would take the whole court, the wallet isn't enough and nothing is paid\n"
+                         "• card: no such limit - check the amount in the app afterwards")
+        lines.append("\nPay with:")
+        warn = "⚠️ " if late else "✅ "
+        self.notifier.send("\n".join(lines), buttons=[
+            [(f"{warn}Book · club wallet", f"by:{arg}:w"), (f"{warn}Book · card", f"by:{arg}:c")],
+            [("✖ No", "bn")]])
         return ""
 
     def _do_booking(self, arg, mid):
-        slot, bookings = self._alert_slot(arg), self.watcher.bookings
+        pid, _, how = arg.partition(":")
+        slot, bookings = self._alert_slot(pid), self.watcher.bookings
         if slot is None or bookings is None:
             return "This alert is too old"
+        method = {"w": "MERCHANT_WALLET", "c": "CREDIT_CARD"}.get(how)
         self._screen(mid, "⏳ Booking...", [])
-        outcome = bookings.book(slot, "tap")
+        outcome = bookings.book(slot, "tap", method=method)
         self._screen(mid, outcome.text, [])
         if outcome.booked:
-            self._tell_players(arg, outcome.text)
+            self._tell_players(pid, outcome.text)
         return "Booked ✅" if outcome.booked else "Not booked"
 
     def _tell_players(self, pid: str, booked_text: str) -> None:

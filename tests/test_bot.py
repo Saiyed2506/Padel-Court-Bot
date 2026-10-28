@@ -497,6 +497,14 @@ class WishTests(unittest.TestCase):
         self.assertTrue(looks_like_date_wish("10.11.2026 16:00-19:30"))
         self.assertFalse(looks_like_date_wish("hello 10.11"))
 
+    def test_soon_warning(self):
+        from padel_bot.wishes import parse_wish, soon_warning
+        now = datetime(2026, 10, 28, 12, 0, tzinfo=TZ)                    # Wednesday noon
+        self.assertIn("less than 24h", soon_warning(parse_wish("29.10.2026 10:00", now.date()), now, 24 * 60))
+        self.assertIn("less than 24h", soon_warning(parse_wish("wed 18:00", now.date()), now, 24 * 60))
+        self.assertEqual(soon_warning(parse_wish("30.10.2026 18:00", now.date()), now, 24 * 60), "")
+        self.assertEqual(soon_warning(parse_wish("sat 10:00", now.date()), now, 24 * 60), "")
+
     def test_wish_store_round_trip(self):
         from padel_bot.wishes import WishStore, parse_wish
         with tempfile.TemporaryDirectory() as tmp:
@@ -579,6 +587,10 @@ class CommandTests(unittest.TestCase):
     def test_plain_date_message_adds_one_time_wish(self):
         reply = self.cc.handle("28.10.2026 between 18:00 - 19:30")
         self.assertIn("Added: Wed 28 Oct (once) 18:00-21:00 (starts 18:00-19:30), 90 min", reply)
+
+    def test_wish_under_24h_is_flagged(self):
+        reply = self.cc.handle("26.10.2026 19:00")                       # today evening (now: Mon 08:00)
+        self.assertIn("⚠️ Some of these times start in less than 24h", reply)
 
     def test_pause_resume_status(self):
         self.assertIn("Paused", self.cc.handle("/pause"))
@@ -1602,7 +1614,7 @@ class BookingMenuTests(MenuBase):
         from padel_bot.polls import Polls
         tmp = Path(self.tmp.name)
         self.telegram.chat_first_name = lambda chat_id: "Mo"
-        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends)
+        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends, clock=self.watcher.clock)
         self.watcher.polls.owner_extra = self.menu.booking_button
         self.acc = FakeBookingAccount()
         self.watcher.bookings = BookingManager(lambda: self.watcher.settings, PlaytomicBooker(self.acc, "T1", self.s.booking),
@@ -1627,9 +1639,11 @@ class BookingMenuTests(MenuBase):
         self.assertEqual(self.tap(f"bb:{pid}", chat_id=777), "Not allowed")   # friends can't book
         self.tap(f"bb:{pid}")
         ask = self.telegram.outbox[-1]
-        self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 (or another free court at that time) for €45?", ask["text"])
-        self.assertEqual(ask["buttons"][0][0], ("✅ Yes, book €45", f"by:{pid}"))
-        self.assertEqual(self.tap(f"by:{pid}"), "Booked ✅")
+        self.assertIn("💳 Book Wed 28 Oct 16:30-18:00, Court 2 (or another free court at that time)?", ask["text"])
+        self.assertIn("your share about €11.25", ask["text"])
+        self.assertNotIn("can NOT cancel", ask["text"])
+        self.assertEqual(ask["buttons"][0], [("✅ Book · club wallet", f"by:{pid}:w"), ("✅ Book · card", f"by:{pid}:c")])
+        self.assertEqual(self.tap(f"by:{pid}:w"), "Booked ✅")
         self.assertIn("✅ BOOKED", self.telegram.edits[-1]["text"])
         to_ali = [m for m in self.telegram.outbox if m["chat_id"] == "777" and "Join the match" in m["text"]]
         self.assertEqual(len(to_ali), 1)
@@ -1637,6 +1651,29 @@ class BookingMenuTests(MenuBase):
         self.assertIn("🤖 Automatic booking: off", self.labels())
         self.assertIn("ON", self.tap("sa"))
 
+
+    def test_under_24h_needs_explicit_ok_and_card_choice(self):
+        # Mon 26 Oct 08:00 now; a court today at 19:00 is under 24h away
+        self.client.replies["2026-10-26"] = [avail("c2", "2026-10-26", ("18:00:00", 90, "45 EUR"))]
+        self.watcher.settings = _replace(self.watcher.settings, windows=self.watcher.settings.windows + (
+            __import__("padel_bot.wishes", fromlist=["parse_wish"]).parse_wish("mon 19:00", date(2026, 10, 26)),))
+        self.watcher.run_round()
+        alert = [m for m in self.telegram.outbox if "Free court" in m["text"] and m["chat_id"] is None][0]
+        self.assertIn("⚠️ <24h: no free cancellation", alert["text"])
+        pid = [d for row in alert["buttons"] for _, d in row if d.startswith("bt:")][0][3:]
+        self.watcher.bookings.state["stage"] = "tested"
+        self.tap(f"bb:{pid}")
+        ask = self.telegram.outbox[-1]
+        self.assertIn("⚠️ Starts in less than 24h - you can NOT cancel it for free", ask["text"])
+        self.assertEqual([label for label, _ in ask["buttons"][0]], ["⚠️ Book · club wallet", "⚠️ Book · card"])
+        self.assertEqual(self.tap("bn"), "OK")                     # "No": nothing booked
+        self.assertEqual(self.watcher.bookings.state["bookings"], [])
+        self.acc.share_field = False                               # like the real Playtomic reply
+        self.assertEqual(self.tap(f"by:{pid}:c"), "Booked ✅")       # card, chosen by you
+        self.assertIn("via card", self.telegram.edits[-1]["text"])
+        self.assertIn("check in the Playtomic app whether only your share was charged", self.telegram.edits[-1]["text"])
+        patch = [b for m, _, b in self.acc.calls if m == "PATCH"][-1]
+        self.assertEqual(patch["selected_payment_method_id"], "c-9")
 
 class OpeningTests(unittest.TestCase):
     def setUp(self):

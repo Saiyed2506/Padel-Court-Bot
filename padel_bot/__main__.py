@@ -193,7 +193,7 @@ def cmd_run(args, settings: Settings) -> int:
     settings = replace(settings, windows=store.load())
     watcher = Watcher(settings, PlaytomicClient(settings.user_agent), club, notifier,
                       SeenState(settings.state_file), tz)
-    watcher.polls = Polls(home / "polls.json", notifier, friends)  # "who's in?" on court alerts
+    watcher.polls = Polls(home / "polls.json", notifier, friends, clock=watcher.clock)  # "who's in?" on court alerts
     watcher.reminders = Reminders(home / "reminders.json", notifier, settings.free_cancel_min)
     runtime = RuntimeSettings(home / "bot_settings.json")
     runtime.apply(watcher)  # pause / night pause / only-⭐ set with buttons earlier

@@ -28,8 +28,9 @@ def poll_id(slot_key: str) -> str:
 
 
 class Polls:
-    def __init__(self, path: Path, notifier, friends):
+    def __init__(self, path: Path, notifier, friends, clock=None):
         self.path = path
+        self.clock = clock  # the bot's clock (tests use a simulated one)
         self.notifier = notifier      # a Broadcaster
         self.friends = friends
         self._owner_name: str | None = None
@@ -101,7 +102,7 @@ class Polls:
         poll["msgs"] = self.notifier.broadcast(self.text(poll), buttons=self.buttons(pid, day, True, poll),
                                                friend_buttons=self.buttons(pid, day, False), silent=silent)
         self.polls[pid] = poll
-        self.prune(datetime.now(slot.start.tzinfo))
+        self.prune(self.clock() if self.clock else datetime.now(slot.start.tzinfo))
         self._save()
 
     def register(self, slot) -> str:

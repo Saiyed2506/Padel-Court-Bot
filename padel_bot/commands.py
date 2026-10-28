@@ -14,7 +14,8 @@ from typing import Callable
 
 from .notify import NotifyError, booking_link, build_messages
 from .playtomic import PlaytomicError
-from .wishes import MAX_WISHES, WishError, WishStore, describe, looks_like_date_wish, parse_wish
+from .wishes import (MAX_WISHES, WishError, WishStore, describe, looks_like_date_wish, parse_wish,
+                     soon_warning)
 
 log = logging.getLogger("padel_bot")
 
@@ -140,7 +141,8 @@ class CommandCenter:
             if window in windows:
                 return "You already have that wish.\n\n" + self.wishes_text()
             self._set_windows(windows + [window])
-            return f"✅ Added: {describe(window)}\nI'll check it in the next minute.\n\n" + self.wishes_text()
+            note = soon_warning(window, self.watcher.clock(), self.watcher.settings.free_cancel_min)
+            return f"✅ Added: {describe(window)}\nI'll check it in the next minute.{note}\n\n" + self.wishes_text()
         if command == "/remove":
             if not args.strip().isdigit() or not 1 <= int(args) <= len(windows):
                 return "Which one? e.g. /remove 2\n\n" + self.wishes_text()
