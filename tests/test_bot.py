@@ -1016,22 +1016,42 @@ class MenuTests(MenuBase):
         self.tap("d:thu")
         self.assertIn("✅ Tue", self.labels())
         self.tap("d:ok")
+        self.assertEqual(self.labels(), ["60 min", "90 min", "120 min", "150 min", "✖ Cancel"])
+        self.tap("u:90")
+        times = self.labels()
+        self.assertEqual((times[0], times[-2]), ("08:00", "22:30"))         # 90 min must end by midnight
         self.tap(f"s:{17 * 60}")
         self.assertIn("Only 17:00", self.labels())
         self.tap(f"l:{18 * 60}")
-        self.tap("u:90")
         self.assertIn("Tue, Thu 17:00-19:30 (starts 17:00-18:00), 90 min", self.last_screen()["text"])
         self.assertEqual(self.tap("ok"), "Added")
         self.assertEqual(len(self.watcher.settings.windows), 3)
         self.assertEqual(len(self.store.load()), 3)          # saved
 
+    def test_calendar(self):
+        self.tap("ow")                                       # today: Mon 26 Oct 2026
+        screen = self.last_screen()
+        self.assertEqual(screen["buttons"][0][1][0], "October 2026")
+        self.assertEqual([label for label, _ in screen["buttons"][1]], ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"])
+        week = [label for label, _ in screen["buttons"][6]]  # 26 Oct is a Monday
+        self.assertEqual(week[:3], ["[26]", "27", "28"])
+        self.assertEqual(screen["buttons"][5][0], ("·", "ign"))  # 19 Oct is over
+        self.assertEqual(screen["buttons"][0][0][1], "ign")      # can't go back before this month
+        self.tap("cal:2026-11")
+        self.assertEqual(self.last_screen()["buttons"][0][1][0], "November 2026")
+        self.assertEqual(self.tap("dt:2026-10-20"), "That day is over")
+        self.tap("dt:2026-11-14")
+        self.assertIn("Sat 14 Nov", self.last_screen()["text"])
+        self.tap("u:150")
+        self.assertEqual(self.labels()[-2], "21:30")         # 150 min ends by midnight
+        self.assertEqual(self.tap("ign"), "")
+
     def test_one_time_wish_matches_only_that_date(self):
         self.tap("ow")
-        self.assertIn("Today", self.labels())
         self.tap("dt:2026-10-29")                            # Thursday
+        self.tap("u:60")
         self.tap(f"s:{20 * 60}")
         self.tap(f"l:{20 * 60}")                             # exactly 20:00
-        self.tap("u:60")
         self.assertIn("Thu 29 Oct (once) 20:00-21:00, 60 min", self.last_screen()["text"])
         self.tap("ok")
         # a free 20:00 hour on Thursday matches; the same on Wednesday doesn't

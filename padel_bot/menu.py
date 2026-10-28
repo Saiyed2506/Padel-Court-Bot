@@ -23,6 +23,9 @@ log = logging.getLogger("padel_bot")
 
 MENU_BUTTON = "🎾 Menu"
 _DAY_LABELS = dict(zip(DAY_KEYS, ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
+DAY_START = 8 * 60  # first start time offered (08:00)
+_MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August",
+                "September", "October", "November", "December"]
 _QUIET_CHOICES = [("23:00", "07:00"), ("00:00", "07:00"), ("01:00", "06:00"), None]
 
 MAIN = [
@@ -37,8 +40,8 @@ GUIDE = """📖 How the padel bot works
 
 🎾 Courts: I check the club every few minutes for free indoor courts that match your wishes and message you with a booking link. ⭐ = your favourite times.
 
-➕ Court wish: every week, e.g. "Mon-Fri, start 16:00-19:00, 90 min".
-📅 One-time wish: one date only, e.g. "Tue 4 Nov, 17:00". It disappears after that day.
+➕ Court wish: every week - pick days, length (60-150 min), earliest and latest start.
+📅 One-time wish: pick a day in the calendar, then length and times. It disappears after that day.
 🎫 Event: watch events by name (Newcomer, Afterwork): new dates, free spots, Sunday overview.
 👥 Friends: friends open this bot and tap Start; you approve them and they get the same alerts.
 ⚙️ Settings: pause, quiet hours, only ⭐ times, Playtomic login.
@@ -135,7 +138,8 @@ class Menu:
         handler = {
             "m": self._go_main, "g": self._go_guide, "x": self._cancel, "bn": self._booking_no,
             "cw": self._start_recurring, "ow": self._start_once,
-            "d": self._toggle_day, "dt": self._pick_date, "s": self._pick_start,
+            "d": self._toggle_day, "dt": self._pick_date, "cal": self._calendar_nav, "ign": lambda a, m: "",
+            "s": self._pick_start,
             "l": self._pick_last, "u": self._pick_length, "ok": self._confirm,
             "mw": self._go_wishes, "dw": self._delete_wish, "de": self._delete_word,
             "ev": self._go_events, "ea": self._add_word,
@@ -188,7 +192,7 @@ class Menu:
         if arg == "ok":
             if not days:
                 return "Pick at least one day"
-            self._start_screen(mid)
+            self._length_screen(mid)
             return None
         if arg == "wk":
             days = set(DAY_KEYS[:5])
@@ -199,53 +203,119 @@ class Menu:
         self.flow["days"] = sorted(days, key=DAY_KEYS.index)
         self._days_screen(mid)
 
+    # --- one-time wish: calendar -------------------------------------------------
+
     def _start_once(self, arg, mid):
         if len(self.watcher.settings.windows) >= MAX_WISHES:
             return f"That's {MAX_WISHES} wishes already - delete one in 📋 My wishes."
         self.flow = {"kind": "once"}
         today = self.watcher.clock().date()
-        days = [today + timedelta(days=i) for i in range(self.watcher.settings.days_ahead + 1)]
-        label = lambda d: "Today" if d == today else format_day(datetime(d.year, d.month, d.day))
-        buttons = [[(label(d), f"dt:{d.isoformat()}") for d in days[i:i + 3]] for i in range(0, len(days), 3)]
-        buttons.append([("✖ Cancel", "x")])
-        self._screen(mid, "📅 One-time wish\nStep 1/4: which date?", buttons)
+        self._calendar_screen(mid, today.year, today.month)
+
+    def _calendar_screen(self, mid, year: int, month: int):
+        """A month view: tap a day. Past days can't be picked; ◀ ▶ change the month."""
+        today = self.watcher.clock().date()
+        opens_until = today + timedelta(days=self.watcher.settings.days_ahead)
+        last_month = (today.replace(day=1) + timedelta(days=100)).replace(day=1)  # about 3 months ahead
+        first = date(year, month, 1)
+        prev_m = (first - timedelta(days=1)).replace(day=1)
+        next_m = (first + timedelta(days=32)).replace(day=1)
+        nav = [("◀", f"cal:{prev_m.isoformat()[:7]}" if prev_m >= today.replace(day=1) else "ign"),
+               (f"{_MONTH_NAMES[month - 1]} {year}", "ign"),
+               ("▶", f"cal:{next_m.isoformat()[:7]}" if next_m <= last_month else "ign")]
+        rows = [nav, [(d, "ign") for d in ("Mo", "Tu", "We", "Th", "Fr", "Sa", "Su")]]
+        week = [("·", "ign")] * first.weekday()
+        day = first
+        while day.month == month:
+            if day < today:
+                week.append(("·", "ign"))
+            else:
+                label = f"[{day.day}]" if day == today else str(day.day)
+                week.append((label, f"dt:{day.isoformat()}"))
+            if len(week) == 7:
+                rows.append(week)
+                week = []
+            day += timedelta(days=1)
+        if week:
+            rows.append(week + [("·", "ign")] * (7 - len(week)))
+        rows.append([("✖ Cancel", "x")])
+        self._screen(mid, "📅 One-time wish\nStep 1/4: pick a day.\n"
+                          f"Courts can be booked up to {format_day(datetime(opens_until.year, opens_until.month, opens_until.day))}; "
+                          "later days are watched as soon as they open.", rows)
+
+    def _calendar_nav(self, arg, mid):
+        try:
+            year, month = (int(x) for x in arg.split("-"))
+        except ValueError:
+            return "Unknown month"
+        self._calendar_screen(mid, year, month)
 
     def _pick_date(self, arg, mid):
         try:
-            self.flow["date"] = date.fromisoformat(arg).isoformat()
+            picked = date.fromisoformat(arg)
         except ValueError:
             return "Unknown date"
-        self._start_screen(mid)
+        if picked < self.watcher.clock().date():
+            return "That day is over"
+        self.flow["date"] = picked.isoformat()
+        self._length_screen(mid)
+
+    # --- shared steps: length, earliest start, latest start --------------------------
 
     def _flow_title(self) -> str:
         if self.flow.get("kind") == "once":
             d = date.fromisoformat(self.flow["date"])
-            return f"📅 One-time wish: {format_day(datetime(d.year, d.month, d.day))}"
-        return "➕ Court wish: " + ", ".join(_DAY_LABELS[k] for k in self.flow.get("days", []))
+            title = f"📅 One-time wish: {format_day(datetime(d.year, d.month, d.day))}"
+        else:
+            title = "➕ Court wish: " + ", ".join(_DAY_LABELS[k] for k in self.flow.get("days", []))
+        if self.flow.get("duration"):
+            title += f", {self.flow['duration']} min"
+        return title
+
+    def _length_screen(self, mid):
+        buttons = [[("60 min", "u:60"), ("90 min", "u:90")], [("120 min", "u:120"), ("150 min", "u:150")],
+                   [("✖ Cancel", "x")]]
+        self._screen(mid, f"{self._flow_title()}\nStep 2/4: how long do you play?", buttons)
+
+    def _pick_length(self, arg, mid):
+        if arg not in ("60", "90", "120", "150") or not (self.flow.get("days") or self.flow.get("date")):
+            return "Start again from 🎾 Menu"
+        self.flow["duration"] = int(arg)
+        self.flow.pop("start", None)
+        self.flow.pop("last", None)
+        self._start_screen(mid)
+
+    def _start_times(self, first: int) -> list[int]:
+        """Start times from `first` in 30-minute steps, as late as the game still ends by midnight."""
+        return list(range(first, 24 * 60 - int(self.flow["duration"]) + 1, 30))
+
+    @staticmethod
+    def _time_grid(times: list[int], prefix: str, per_row: int = 4):
+        return [[(hhmm(t), f"{prefix}:{t}") for t in times[i:i + per_row]] for i in range(0, len(times), per_row)]
 
     def _start_screen(self, mid):
-        times = list(range(7 * 60, 22 * 60, 30))
-        buttons = [[(hhmm(t), f"s:{t}") for t in times[i:i + 5]] for i in range(0, len(times), 5)]
-        buttons.append([("✖ Cancel", "x")])
-        self._screen(mid, f"{self._flow_title()}\nStep 2/4: earliest start time?", buttons)
+        buttons = self._time_grid(self._start_times(DAY_START), "s") + [[("✖ Cancel", "x")]]
+        self._screen(mid, f"{self._flow_title()}\nStep 3/4: earliest start time?", buttons)
 
     def _pick_start(self, arg, mid):
-        if not arg.isdigit():
-            return "Unknown time"
+        if not arg.isdigit() or "duration" not in self.flow:
+            return "Start again from 🎾 Menu"
         start = int(arg)
         self.flow["start"] = start
-        later = [t for t in range(start + 30, min(start + 5 * 60, 22 * 60) + 1, 30)]
         buttons = [[(f"Only {hhmm(start)}", f"l:{start}")]]
-        buttons += [[(hhmm(t), f"l:{t}") for t in later[i:i + 5]] for i in range(0, len(later), 5)]
-        buttons.append([("✖ Cancel", "x")])
-        self._screen(mid, f"{self._flow_title()}, from {hhmm(start)}\nStep 3/4: latest start time?", buttons)
+        buttons += self._time_grid(self._start_times(start + 30), "l") + [[("✖ Cancel", "x")]]
+        self._screen(mid, f"{self._flow_title()}, from {hhmm(start)}\n"
+                          "Step 4/4: latest start time? (any start in between is fine)", buttons)
 
     def _pick_last(self, arg, mid):
         if not arg.isdigit() or "start" not in self.flow:
             return "Start again from 🎾 Menu"
         self.flow["last"] = max(int(arg), self.flow["start"])
-        buttons = [[("60 min", "u:60"), ("90 min", "u:90"), ("120 min", "u:120")], [("✖ Cancel", "x")]]
-        self._screen(mid, f"{self._flow_title()}, start {self._starts_text()}\nStep 4/4: how long do you play?", buttons)
+        try:
+            window = self._build_window()
+        except ValueError as exc:
+            return str(exc)
+        self._screen(mid, f"Add this wish?\n\n{describe(window)}", [[("✅ Add this wish", "ok"), ("✖ Cancel", "x")]])
 
     def _starts_text(self) -> str:
         start, last = self.flow["start"], self.flow.get("last", self.flow["start"])
@@ -262,17 +332,6 @@ class Menu:
                       durations=frozenset({duration}),
                       preferred_starts=frozenset({f["start"]}) if exact else frozenset(),
                       on_date=date.fromisoformat(f["date"]) if f.get("kind") == "once" else None)
-
-    def _pick_length(self, arg, mid):
-        if arg not in ("60", "90", "120") or "last" not in self.flow:
-            return "Start again from 🎾 Menu"
-        self.flow["duration"] = int(arg)
-        try:
-            window = self._build_window()
-        except ValueError as exc:
-            return str(exc)
-        buttons = [[("✅ Add this wish", "ok"), ("✖ Cancel", "x")]]
-        self._screen(mid, f"Add this wish?\n\n{describe(window)}", buttons)
 
     def _confirm(self, arg, mid):
         try:
