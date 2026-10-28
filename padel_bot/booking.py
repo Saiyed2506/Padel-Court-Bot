@@ -170,31 +170,28 @@ class PlaytomicBooker:
     def select(self, intent_id: str, kind: str, method_id: str, trace: list[str]) -> str:
         """Choose the payment method; returns the payment's status afterwards.
 
-        Playtomic's exact format isn't documented, so the known variants are
-        tried until the payment is ready to confirm (or already paid). Every
-        step is written to `trace` for diagnosis. Stops at once on a final status.
+        Format as in the open-source playtomic-courtbook (works on the current app
+        API): {"selected_payment_method_id": <id>, "selected_payment_method_data": null}.
         """
         short = METHOD_NAMES.get(kind, kind)
-        variants = [("id", {"selected_payment_method": method_id})]
-        if kind != method_id:
-            variants.append(("type", {"selected_payment_method": kind}))   # padel-cli sends the type
-        variants += [("id-field", {"selected_payment_method_id": method_id}),
-                     ("object", {"selected_payment_method": {"payment_method_id": method_id, "method_type": kind}})]
-        for label, body in variants:
-            try:
-                reply = self.account.send("PATCH", f"/v1/payment_intents/{intent_id}", body)
-            except PlaytomicError as exc:
-                if exc.status is not None and exc.status >= 500:
-                    raise
-                trace.append(f"{short}[{label}]→{exc}"[:160])
-                if "final status" in str(exc).lower():
-                    return "FAILED"
-                continue
-            status = self._status_now(intent_id, reply)
-            trace.append(f"{short}[{label}]→{status or 'no status'}")
-            if not status or status in self.READY or status in self.SUCCESS or status in self.FINAL_FAIL:
-                return status
-        return "NOT_ACCEPTED"
+        try:
+            reply = self.account.send("PATCH", f"/v1/payment_intents/{intent_id}",
+                                      {"selected_payment_method_id": method_id, "selected_payment_method_data": None})
+        except PlaytomicError as exc:
+            if exc.status is not None and exc.status >= 500:
+                raise
+            trace.append(f"{short} select→{exc}"[:160])
+            return "FAILED" if "final status" in str(exc).lower() else "NOT_ACCEPTED"
+        status = self._status_now(intent_id, reply)
+        trace.append(f"{short} select→{status or 'no status'}")
+        return status
+
+    def explicit_share(self, intent: dict) -> float | None:
+        """An amount Playtomic clearly labels as 'your part now', if any."""
+        for where, amount in self.amount_fields(intent):
+            if any(w in where.lower() for w in ("to_pay", "pay_now", "per_player", "share", "user_amount")):
+                return amount
+        return None
 
     @staticmethod
     def method_shapes(intent: dict) -> str:
@@ -360,8 +357,27 @@ class BookingManager:
         balance = self.booker.wallet_balance(intent)
         if balance is not None:
             self.state["wallet"] = {"balance": balance, "at": self.clock().isoformat()}
+            self._check_share_probe(balance)
             self._save()
         return balance
+
+    def _check_share_probe(self, balance: float) -> None:
+        """After the first wallet booking: did Playtomic take only the share?"""
+        probe = self.state.get("share_probe")
+        if not probe:
+            return
+        taken = probe["before"] - balance
+        if abs(taken - probe["share"]) <= 1.0:
+            self.state["share_verified"] = True
+            self.state.pop("share_probe", None)
+            self._say(f"✅ Verified: Playtomic took only your share (€{taken:.2f}) from the wallet. "
+                      "From now on the card can be used too.")
+        elif taken > probe["share"] + 1.0:
+            self.state.pop("share_probe", None)
+            self._say(f"⚠️ Your wallet went down by €{taken:.2f} since the bot's booking (your share would be "
+                      f"€{probe['share']:.2f}). If that's from the booking, Playtomic charged more than your share - "
+                      "please check the booking in the app. The bot keeps paying with the wallet only.")
+        # less than the share taken (e.g. you topped up): keep waiting for a clear reading
 
     def note_active(self, count: int) -> None:
         """Track Playtomic's active-booking limit; say when booking can resume."""
@@ -539,19 +555,36 @@ class BookingManager:
         wallet_before = self._note_wallet(intent)
         if price is not None and price > self.rules.max_price_eur:
             raise BookingError(f"Playtomic's price €{price:g} is above your limit of €{self.rules.max_price_eur:g}.")
-        if self.rules.split_payment:
-            # Safety: only ever pay your share. If Playtomic's reply says it would take
-            # the whole court (or doesn't say), stop before choosing a payment method.
-            share = (price or slot.price_eur) / self.rules.players
-            charged = self.booker.charged_amount(intent)
-            if charged is None or charged > share * 1.25:
-                money = ", ".join(f"{w}={a:g}" for w, a in self.booker.amount_fields(intent))[:300]
-                self._log(kind="book", mode=mode, slot=slot.key, stopped="whole court", money=money, intent=intent)
-                raise BookingError(
-                    f"Playtomic would charge {'€%g' % charged if charged is not None else 'an unclear amount'} "
-                    f"- not just your share (€{share:.2f}). Stopped before paying; nothing was paid.\n"
-                    f"For Claude - money: {money or 'none found'}")
         methods = self.booker.ordered_methods(intent)
+        probe = None
+        if self.rules.split_payment and not self.state.get("share_verified"):
+            # Safety: only ever pay your share. Until a booking has shown that Playtomic
+            # takes only your share, pay with the club wallet only - and only while it
+            # holds more than your share but less than the whole court, so a whole-court
+            # charge simply fails (nothing paid). The next wallet reading verifies it.
+            full = price or slot.price_eur
+            share = full / self.rules.players
+            labelled = self.booker.explicit_share(intent)
+            if labelled is not None and labelled > share * 1.25:
+                raise BookingError(f"Playtomic would charge €{labelled:g} - not just your share (€{share:.2f}). "
+                                   "Stopped before paying; nothing was paid.")
+            if labelled is None:
+                wallet = [m for m in methods if m[0] == "MERCHANT_WALLET"]
+                if wallet and wallet_before is not None and share <= wallet_before < full * 0.95:
+                    methods, probe = wallet, {"before": wallet_before, "share": share, "full": full}
+                else:
+                    money = ", ".join(f"{w}={a:g}" for w, a in self.booker.amount_fields(intent))[:300]
+                    self._log(kind="book", mode=mode, slot=slot.key, stopped="share unclear", money=money)
+                    if wallet_before is not None and wallet_before < share:
+                        why = "your club wallet has less than your share"
+                    elif wallet_before is not None:
+                        why = "your club wallet holds the whole court price, so it can't act as a safety limit"
+                    else:
+                        why = "I can't see your wallet balance"
+                    raise BookingError(
+                        f"Not sure yet that Playtomic takes only your share (€{share:.2f}), and {why}. "
+                        "Stopped before paying; nothing was paid.\n"
+                        f"For Claude - money: {money or 'none found'}")
         if not methods:
             offered = ", ".join(t for t, _ in self.booker.methods(intent)) or "none"
             raise BookingError(f"None of your payment methods is offered (Playtomic offers: {offered}).")
@@ -593,6 +626,9 @@ class BookingManager:
             if self.booker.status(reply) in self.booker.FINAL_FAIL:
                 fresh_needed = True
                 continue
+            if probe is not None:
+                self.state["share_probe"] = probe
+                self._save()
             return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
         shapes = self.booker.method_shapes(intent)
         self._log(kind="book", mode=mode, slot=slot.key, trace=trace, method_shapes=shapes)

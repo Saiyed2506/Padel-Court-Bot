@@ -1347,12 +1347,14 @@ class FakeBookingAccount:
                 intent["amount_to_pay"] = f"{self.price / 4:g} EUR"     # Playtomic says: you pay your share now
             return intent
         if method == "PATCH":
-            self.selected = body.get("selected_payment_method")
+            self.selected = body.get("selected_payment_method_id", body.get("selected_payment_method"))
             if self.patch_accepts is not None:
-                ok = self.patch_accepts(body)
-                return {"status": "REQUIRES_CONFIRMATION" if ok else "REQUIRES_PAYMENT_METHOD"}
+                self.ready = self.patch_accepts(body)
+                return {"status": "REQUIRES_CONFIRMATION" if self.ready else "REQUIRES_PAYMENT_METHOD"}
             return {}
         if path.endswith("/confirmation"):
+            if not getattr(self, "ready", True):
+                raise PlaytomicError("HTTP 422: PaymentIntent must be in status REQUIRES_CONFIRMATION", status=422)
             if self.confirm_error:
                 raise self.confirm_error
             if self.selected in self.refuse:
@@ -1418,7 +1420,8 @@ class BookingTests(unittest.TestCase):
                       "via club wallet. Wallet left €8.75. Invite your fellow players", out.text)
         self.assertIn("Free cancellation until Tue 27 Oct 17:00", out.text)
         self.assertIn("https://app.playtomic.com/matches/m-77", out.text)
-        self.assertEqual([b for m, _, b in self.acc.calls if m == "PATCH"], [{"selected_payment_method": "w-1"}])
+        self.assertEqual([b for m, _, b in self.acc.calls if m == "PATCH"],
+                         [{"selected_payment_method_id": "w-1", "selected_payment_method_data": None}])
         self.assertEqual(self.bm.stage, "verified")
         self.assertEqual(len(self.reminders.items), 1)
         self.assertEqual(self.make().stage, "verified")          # survives a restart
@@ -1445,28 +1448,25 @@ class BookingTests(unittest.TestCase):
         self.bm.prepare()
         self.assertIn("You're back at 1 active court booking(s)", self.telegram.sent[-1])
 
-    def test_payment_method_format_is_found(self):
-        # Playtomic only accepts the method TYPE (like padel-cli sends), not the id
-        self.acc.patch_accepts = lambda body: body == {"selected_payment_method": "MERCHANT_WALLET"}
+    def test_payment_method_format(self):
         out = self.bm.book(self.slot(), "tap")
         self.assertTrue(out.booked, out.text)
         patches = [b for m, _, b in self.acc.calls if m == "PATCH"]
-        self.assertEqual(patches, [{"selected_payment_method": "w-1"}, {"selected_payment_method": "MERCHANT_WALLET"}])
+        self.assertEqual(patches, [{"selected_payment_method_id": "w-1", "selected_payment_method_data": None}])
 
-    def test_no_format_accepted_explains(self):
+    def test_payment_not_ready_explains(self):
         self.acc.patch_accepts = lambda body: False
         out = self.bm.book(self.slot(), "tap")
         self.assertFalse(out.booked)
         self.assertIn("Nothing was paid", out.text)
-        self.assertIn("steps: club wallet[id]→REQUIRES_PAYMENT_METHOD | club wallet[type]→", out.text)
+        self.assertIn("club wallet select→REQUIRES_PAYMENT_METHOD | club wallet confirm→HTTP 422", out.text)
         self.assertIn("methods: MERCHANT_WALLET{balance,method_type,payment_method_id}", out.text)
-        self.assertNotIn("/confirmation", " ".join(p for _, p, _ in self.acc.calls))   # never confirmed blindly
 
     def test_failed_wallet_then_card_on_a_new_payment(self):
         self.acc.patch_accepts = lambda body: body.get("selected_payment_method") != "w-1"   # wallet id -> FAILED below
         orig = self.acc.send
         def send(method, path, body=None):
-            if method == "PATCH" and body == {"selected_payment_method": "w-1"}:
+            if method == "PATCH" and body.get("selected_payment_method_id") == "w-1":
                 self.acc.calls.append((method, path, body))
                 return {"status": "FAILED"}
             return orig(method, path, body)
@@ -1489,14 +1489,44 @@ class BookingTests(unittest.TestCase):
         self.assertTrue(out.booked, out.text)
         self.assertNotIn("/v1/payment_intents/pi-1/confirmation", [p for _, p, _ in self.acc.calls])
 
-    def test_never_pays_the_whole_court(self):
-        self.acc.share_field = False                         # only price=48 in the reply
+    def test_share_probe_with_wallet_only(self):
+        # Playtomic shows only the court price (45). Wallet 20: more than the share (11.25),
+        # less than the court - so the first booking pays with the wallet only.
+        self.acc.share_field = False
+        self.acc.refuse = {"w-1"}                                  # wallet payment fails ...
         out = self.bm.book(self.slot(), "tap")
         self.assertFalse(out.booked)
-        self.assertIn("Playtomic would charge €45 - not just your share (€11.25). Stopped before paying", out.text)
-        self.assertIn("For Claude - money: price=45", out.text)
-        self.assertEqual([m for m, _, _ in self.acc.calls], ["POST"])           # no method chosen, nothing confirmed
-        self.assertIn("money: price=45", self.bm.test(self.slot(day=29)))     # the test shows the amounts too
+        self.assertNotIn("c-9", [b.get("selected_payment_method_id") for m, _, b in self.acc.calls if m == "PATCH"])
+        self.acc.refuse = set()                                    # ... card is never tried in the probe
+        out = self.bm.book(self.slot(day=29), "tap")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("via club wallet", out.text)
+        self.assertEqual(self.bm.state["share_probe"]["before"], 20.0)
+        # next booking step reads the wallet: 20 - 11.25 = 8.75 -> only the share was taken
+        self.acc.methods[0]["balance"] = {"amount": 8.75}
+        self.bm.test(self.slot(day=30))
+        self.assertTrue(self.bm.state["share_verified"])
+        self.assertIn("✅ Verified: Playtomic took only your share (€11.25)", self.telegram.sent[-1])
+        # from now on the card may be used as well
+        self.acc.refuse = {"w-1"}
+        self.bm.state["bookings"] = []
+        self.assertIn("via card", self.bm.book(self.slot(day=31), "tap").text)
+
+    def test_no_share_probe_when_wallet_could_pay_the_whole_court(self):
+        self.acc.share_field = False
+        self.acc.methods[0]["balance"] = {"amount": 60.0}
+        out = self.bm.book(self.slot(), "tap")
+        self.assertIn("can't act as a safety limit. Stopped before paying; nothing was paid", out.text)
+        self.assertEqual([m for m, _, _ in self.acc.calls], ["POST"])
+        self.assertIn("money: price=45", self.bm.test(self.slot(day=29)))
+
+    def test_whole_court_charge_detected(self):
+        self.acc.share_field = False
+        self.bm.book(self.slot(), "tap")
+        self.acc.methods[0]["balance"] = {"amount": 2.0}            # 18 gone, share was 11.25
+        self.bm.test(self.slot(day=29))
+        self.assertIn("⚠️ Your wallet went down by €18.00", self.telegram.sent[-1])
+        self.assertFalse(self.bm.state.get("share_verified"))
 
     def test_wallet_refused_then_card(self):
         self.acc.refuse = {"w-1"}
