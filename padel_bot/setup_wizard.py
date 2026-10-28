@@ -93,19 +93,18 @@ def setup_telegram(env_path: Path) -> TelegramNotifier:
   4. It asks for a username ending in 'bot'. Send e.g.:  padel_alerts_<yourname>_bot
   5. It replies with a long token like 123456789:AAH... - copy it.
 """)
-    while True:
-        token = _ask("Paste the token here (right-click or Ctrl+V), then Enter: ")
-        if not TOKEN_PATTERN.match(token):
-            print("That doesn't look like a bot token (numbers, a colon, then letters). Try again.")
-            continue
-        notifier = TelegramNotifier(token, "")
-        try:
-            username = notifier.bot_username()
-            break
-        except NotifyError as exc:
-            print(f"Telegram didn't accept that token ({exc}). Copy it again from BotFather.")
+    token, notifier, username = ask_token()
 
     _step(2, "Say hello to your bot")
+    chat_id, name = find_chat(notifier, username)
+    write_env_values(env_path, {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": chat_id})
+    os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"] = token, chat_id
+    print(f"Saved to {env_path.name} (chat: {name}). This file stays on your laptop only.")
+    return TelegramNotifier(token, chat_id)
+
+
+def find_chat(notifier: TelegramNotifier, username: str) -> tuple[str, str]:
+    """Your chat ID with the bot: you press START, the bot reads who wrote."""
     print(f"In Telegram, open  https://t.me/{username}  (or search @{username}) and press START.")
     while True:
         _pause("Press Enter here after you pressed START... ")
@@ -120,10 +119,59 @@ def setup_telegram(env_path: Path) -> TelegramNotifier:
         choice = _ask("Several people wrote to the bot. Which number is you? ")
         if choice.isdigit() and 1 <= int(choice) <= len(chats):
             chat_id, name = chats[int(choice) - 1]
+    return chat_id, name
+
+
+def _clear_screen() -> None:
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def ask_token() -> tuple[str, TelegramNotifier, str]:
+    """Reads a bot token and wipes it from the window right away, so a
+    screenshot of the setup never shows it."""
+    while True:
+        token = _ask("Paste the token here (right-click or Ctrl+V), then Enter: ")
+        _clear_screen()
+        if not TOKEN_PATTERN.match(token):
+            print("That doesn't look like a bot token (numbers, a colon, then letters). Try again.")
+            continue
+        notifier = TelegramNotifier(token, "")
+        try:
+            username = notifier.bot_username()
+        except NotifyError as exc:
+            print(f"Telegram didn't accept that token ({exc}). Copy it again from BotFather.")
+            continue
+        print(f"Token accepted for @{username} (hidden from this window on purpose).")
+        return token, notifier, username
+
+
+def bot_id(token: str) -> str:
+    return token.split(":", 1)[0]
+
+
+def change_token(env_path: Path) -> int:
+    """After /revoke in BotFather: swap in the new token, keep everything else."""
+    old = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    print("""Change the Telegram token - nothing else changes (wishes, club, friends,
+Playtomic login all stay).
+  1. In Telegram open BotFather, send  /revoke  and pick your padel bot.
+  2. Copy the NEW token it sends.
+""")
+    token, notifier, username = ask_token()
+    if not (old and chat_id and bot_id(old) == bot_id(token)):
+        print("That's a different bot than before, so I need your chat with it once.")
+        chat_id, _ = find_chat(notifier, username)
     write_env_values(env_path, {"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": chat_id})
     os.environ["TELEGRAM_BOT_TOKEN"], os.environ["TELEGRAM_CHAT_ID"] = token, chat_id
-    print(f"Saved to {env_path.name} (chat: {name}). This file stays on your laptop only.")
-    return TelegramNotifier(token, chat_id)
+    try:
+        TelegramNotifier(token, chat_id).send("🔑 New token saved. The old one no longer works.")
+    except NotifyError as exc:
+        print(f"Saved, but the test message failed: {exc}")
+        return 1
+    print(f"Saved to {env_path.name}. A test message is on its way to Telegram.")
+    print("If run-bot.bat is open: close it and start it again.")
+    return 0
 
 
 def setup_club(config_path: Path):

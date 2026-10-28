@@ -247,7 +247,9 @@ What only you can do (most important first):
    Security). Whoever controls your Telegram can control the bot.
 2. **GitHub: turn on 2FA.** `update.bat` downloads the code from your
    repository; a stolen GitHub account could change it.
-3. **If the bot token was ever visible** (screenshots): BotFather → `/revoke`.
+3. **If the bot token was ever visible** (screenshots): BotFather → `/revoke`,
+   then double-click `new-token.bat` and paste the new token. Nothing else
+   needs redoing. The setup windows wipe the token from the screen after pasting.
 4. Keep the bot folder **outside OneDrive/Dropbox** (the bot warns you).
 5. Lock your Windows account with a password; emergency stop: `/logout`
    (deletes the Playtomic login) or ⚙️ Settings → pause.

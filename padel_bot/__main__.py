@@ -113,6 +113,11 @@ def cmd_test_notify(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_new_token(args, settings: Settings) -> int:
+    from .setup_wizard import change_token
+    return change_token(args.config.parent / ".env")
+
+
 def cmd_telegram_chat_id(args, settings: Settings) -> int:
     notifier = TelegramNotifier(require_env("TELEGRAM_BOT_TOKEN"), "")
     chats = notifier.recent_chats()
@@ -265,6 +270,9 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("test-notify", help="send a test Telegram message")
     p.set_defaults(func=cmd_test_notify, needs_club=True)
+
+    p = sub.add_parser("new-token", help="swap in a new Telegram token after /revoke (keeps everything else)")
+    p.set_defaults(func=cmd_new_token, needs_club=False)
 
     p = sub.add_parser("telegram-chat-id", help="show your Telegram chat ID (setup helper)")
     p.set_defaults(func=cmd_telegram_chat_id, needs_club=False)

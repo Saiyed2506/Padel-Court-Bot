@@ -845,6 +845,39 @@ class EventWatcherTests(unittest.TestCase):
 
 
 class SecurityTests(unittest.TestCase):
+    def test_new_token_keeps_chat_and_wipes_screen(self):
+        import os
+        from unittest import mock
+        from padel_bot import setup_wizard as sw
+        old, new = "12345:" + "A" * 35, "12345:" + "B" * 35
+        sent, cleared = [], []
+
+        class FakeTg:
+            def __init__(self, token, chat_id):
+                self.token, self.chat_id = token, chat_id
+            def bot_username(self):
+                return "padel_bot"
+            def send(self, text, **kw):
+                sent.append((self.token, self.chat_id))
+            def recent_chats(self):
+                raise AssertionError("same bot: chat must be kept")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": old, "TELEGRAM_CHAT_ID": "777"}), \
+                mock.patch.object(sw, "TelegramNotifier", FakeTg), \
+                mock.patch.object(sw, "_ask", lambda prompt: new), \
+                mock.patch.object(sw, "_clear_screen", lambda: cleared.append(1)), \
+                mock.patch("builtins.print"):
+            env = Path(tmp) / ".env"
+            env.write_text(f"TELEGRAM_BOT_TOKEN={old}\nTELEGRAM_CHAT_ID=777\n", encoding="utf-8")
+            self.assertEqual(sw.change_token(env), 0)
+            text = env.read_text(encoding="utf-8")
+        self.assertIn(new, text)
+        self.assertNotIn(old, text)
+        self.assertIn("777", text)
+        self.assertEqual(sent, [(new, "777")])
+        self.assertTrue(cleared)
+
     def test_token_file_is_protected_and_old_files_upgraded(self):
         from unittest import mock
         from padel_bot import secure
