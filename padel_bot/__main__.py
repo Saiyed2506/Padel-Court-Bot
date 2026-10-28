@@ -18,6 +18,7 @@ from .playtomic import Club, PlaytomicClient, PlaytomicError, load_or_fetch_club
 from .rules import court_is_wanted, find_matches, parse_availability
 from .state import SeenState
 from .timeutil import club_timezone, format_day, format_time
+from . import secure
 from .account import PlaytomicAccount
 from .commands import CommandCenter
 from .events import EventWatcher, EventWords
@@ -134,6 +135,20 @@ def cmd_setup(args, settings: Settings) -> int:
     return run_setup(args.config, run_check)
 
 
+def check_security(home: Path) -> list[str]:
+    """Lock down secret files and warn about risky set-ups (once per start)."""
+    notes = []
+    for name in (".env", "playtomic_token.json", "bookings_state.json", "friends.json"):
+        secure.restrict(home / name)
+    synced = secure.cloud_synced(home)
+    if synced:
+        notes.append(f"⚠️ Security: the bot folder is inside {synced}, so your secret files (.env with the "
+                     "Telegram token, the Playtomic login) are copied to the cloud. Move the folder out, e.g. to "
+                     "C:\\padel-bot, and run update.bat there.")
+        log.warning("Bot folder is inside %s - secret files are synced to the cloud.", synced)
+    return notes
+
+
 def account_for(settings: Settings) -> PlaytomicAccount:
     return PlaytomicAccount(settings.state_file.parent / "playtomic_token.json", settings.user_agent)
 
@@ -210,11 +225,14 @@ def cmd_run(args, settings: Settings) -> int:
     if settings.telegram_commands:
         watcher.commands = CommandCenter(watcher, notifier, store, friends=friends, runtime=runtime)
         watcher.commands.register_menu()
+    security_notes = check_security(home)
     try:
         status = "⏸ paused - tap 🎾 Menu → Settings to resume" if watcher.paused else "watching"
         notifier.send(f"✅ Padel bot started ({status}).\n\n"
                       + (watcher.commands.wishes_text() + "\n\nTap 🎾 Menu below for buttons." if watcher.commands else ""),
                       **({"keyboard": [[MENU_BUTTON]]} if watcher.commands else {}))
+        for note in security_notes:
+            notifier.send(note)
     except NotifyError as exc:
         log.error("Could not send the start message: %s", exc)
     log.info("Watching days 0-%d. Press Ctrl+C to stop.", settings.days_ahead)

@@ -33,6 +33,8 @@ def write_env_values(path: Path, values: dict[str, str]) -> None:
             out.append(line)
     out.extend(f"{k}={v}" for k, v in remaining.items())
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    from . import secure
+    secure.restrict(path)  # only your Windows user may read the Telegram token
 
 
 def _set_config_string(config_path: Path, key: str, value: str) -> None:

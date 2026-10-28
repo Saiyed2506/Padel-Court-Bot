@@ -227,6 +227,31 @@ Risk: this uses Playtomic's undocumented app API with your account and
 money. Booking automatically - especially at the exact opening second - is
 easy for Playtomic to notice and could get your account restricted.
 
+## Security
+
+What the bot does:
+- Only **your** Telegram chat can control it; friends can only vote and mark
+  "booked"; strangers are ignored. Booking buttons work only in your chat.
+- Your Playtomic **password is never stored or logged** (the Telegram message
+  is deleted). The login **token is encrypted with Windows' own encryption**
+  (tied to your Windows account) and only your user may read the file.
+  `.env` (Telegram token) is restricted to your user too.
+- **Money brakes:** max €70 per court, 1 bot booking per day of play, never
+  the same slot twice, **max €120 paid by automatic bookings per 7 days**
+  (`max_spend_7d`), automatic booking pauses itself if an outcome is unclear,
+  never books under 24h. Every payment is reported in Telegram.
+- No third-party packages; the booking log holds no payment ids.
+
+What only you can do (most important first):
+1. **Telegram: turn on Two-Step Verification** (Settings → Privacy and
+   Security). Whoever controls your Telegram can control the bot.
+2. **GitHub: turn on 2FA.** `update.bat` downloads the code from your
+   repository; a stolen GitHub account could change it.
+3. **If the bot token was ever visible** (screenshots): BotFather → `/revoke`.
+4. Keep the bot folder **outside OneDrive/Dropbox** (the bot warns you).
+5. Lock your Windows account with a password; emergency stop: `/logout`
+   (deletes the Playtomic login) or ⚙️ Settings → pause.
+
 ## Wishes by date
 
 Send e.g. `10.11.2026 16:00-19:30`: that date only, any start between

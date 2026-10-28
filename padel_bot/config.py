@@ -40,6 +40,7 @@ class BookingSettings:
     max_per_day: int = 1                 # bookings by the bot per day of play
     max_per_week: int = 0                # 0 = no weekly limit
     max_active: int = 0                  # own cap on active bookings; 0 = none (Playtomic enforces its own)
+    max_spend_7d: float = 120.0          # automatic bookings stop above this much paid (your shares) in 7 days
 
 
 @dataclass(frozen=True)
@@ -156,6 +157,7 @@ def _booking(raw: dict) -> BookingSettings:
             max_per_day=int(raw.get("max_per_day", d.max_per_day)),
             max_per_week=int(raw.get("max_per_week", d.max_per_week)),
             max_active=int(raw.get("max_active", d.max_active)),
+            max_spend_7d=float(raw.get("max_spend_7d", d.max_spend_7d)),
         )
     except (TypeError, ValueError) as exc:
         raise ConfigError(f"[booking]: {exc}") from None

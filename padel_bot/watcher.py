@@ -155,6 +155,10 @@ class Watcher:
         ]
         if self.settings.min_notice_min:
             lines.append(f"⏱ Only games at least {self.settings.min_notice_min // 60}h ahead (free cancellation buffer).")
+        if self.bookings is not None and self.bookings.auto_on:
+            cap = self.bookings.rules.max_spend_7d
+            lines.append(f"💶 Paid by the bot in 7 days: €{self.bookings.spent_7d():.2f}"
+                         + (f" of max €{cap:g}" if cap else ""))
         wallet = self.bookings.state.get("wallet") if self.bookings is not None else None
         if wallet:
             when = datetime.fromisoformat(wallet["at"]).strftime("%a %H:%M")

@@ -73,6 +73,7 @@ auto_min_hours = 24           # automatic bookings only if still cancellable for
 max_per_day = 1               # at most this many bot bookings per day of play
 max_per_week = 0              # 0 = no weekly limit
 max_active = 0                # 0 = no own cap; Playtomic refuses above its limit (6 with Wellpass) and you're told once
+max_spend_7d = 120            # safety brake: automatic bookings stop above this much paid (your shares) in 7 days
 
 [events]
 # Club events, matched by name: group classes (public) and Open Play events

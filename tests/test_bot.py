@@ -843,6 +843,49 @@ class EventWatcherTests(unittest.TestCase):
         self.assertIn("Which one?", cc.handle("/unwatch 7"))
 
 
+
+class SecurityTests(unittest.TestCase):
+    def test_token_file_is_protected_and_old_files_upgraded(self):
+        from unittest import mock
+        from padel_bot import secure
+        from padel_bot.account import PlaytomicAccount
+        fake_protect = lambda text: "dpapi:" + text[::-1]          # stand-in for Windows encryption
+        fake_unprotect = lambda stored: stored[6:][::-1] if stored.startswith("dpapi:") else stored
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(secure, "protect", fake_protect), mock.patch.object(secure, "unprotect", fake_unprotect):
+            path = Path(tmp) / "playtomic_token.json"
+            path.write_text('{"access_token": "A1", "refresh_token": "R1"}', encoding="utf-8")   # old plain file
+            acc = PlaytomicAccount(path, "ua")
+            self.assertEqual(acc.token["refresh_token"], "R1")
+            stored = path.read_text(encoding="utf-8")
+            self.assertTrue(stored.startswith("dpapi:"))
+            self.assertNotIn("R1", stored)
+            self.assertEqual(PlaytomicAccount(path, "ua").token["access_token"], "A1")
+            path.write_text("dpapi:garbage-from-another-pc", encoding="utf-8")
+            with mock.patch.object(secure, "unprotect", side_effect=OSError("can't decrypt")):
+                self.assertFalse(PlaytomicAccount(path, "ua").logged_in)   # just asks to log in again
+
+    def test_cloud_folder_warning(self):
+        from padel_bot import secure
+        self.assertEqual(secure.cloud_synced(Path("C:/Users/mo/OneDrive/Documents/padel")), "Onedrive")
+        self.assertIsNone(secure.cloud_synced(Path("/home/user/padel")))
+
+    def test_booking_log_has_no_full_replies(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        from padel_bot.booking import BookingManager, PlaytomicBooker
+        s = settings(Path(tmp.name))
+        acc = FakeBookingAccount()
+        log_path = Path(tmp.name) / "log.jsonl"
+        bm = BookingManager(lambda: s, PlaytomicBooker(acc, "T1", s.booking), Path(tmp.name) / "st.json", log_path,
+                            FakeNotifier(), TZ, lambda: datetime(2026, 10, 26, 8, 0, tzinfo=TZ))
+        bm.test(Slot("c2", "Court 2", datetime(2026, 10, 28, 17, 0, tzinfo=TZ), 90, 45.0, "45 EUR"))
+        bm.book(Slot("c2", "Court 2", datetime(2026, 10, 28, 17, 0, tzinfo=TZ), 90, 45.0, "45 EUR"), "tap")
+        text = log_path.read_text(encoding="utf-8")
+        self.assertNotIn('"w-1"', text)                  # no payment method ids ...
+        self.assertNotIn('"c-9"', text)
+        self.assertNotIn("pi-1", text)                  # ... nor payment ids - only names, statuses, amounts
+
 class AccountTests(unittest.TestCase):
     def test_login_refresh_and_retry(self):
         from padel_bot.account import AuthError, PlaytomicAccount
@@ -1595,6 +1638,16 @@ class BookingTests(unittest.TestCase):
         self.assertTrue(out.booked, out.text)
         sent = [b for m, p, b in self.acc.calls if p == "/v1/payment_intents"][0]
         self.assertEqual(sent["cart"]["requested_item"]["cart_item_data"]["resource_id"], "c3")
+
+    def test_money_brake(self):
+        self.bm.state.update(stage="verified", auto=True)
+        self.s = _replace(self.s, booking=_replace(self.s.booking, max_spend_7d=20))
+        self.assertTrue(self.bm.book(self.slot(day=28), "auto").booked)          # 11.25 paid
+        out = self.bm.book(self.slot(day=29), "auto")                            # 22.50 > 20
+        self.assertIn("Money brake: €11.25 already paid by the bot in 7 days, limit €20", out.text)
+        self.assertTrue(self.bm.book(self.slot(day=29), "tap").booked)           # your own tap isn't braked
+        self.now += timedelta(days=8)
+        self.assertEqual(self.bm.spent_7d(), 0)
 
     def test_cannot_check_existing_bookings_means_no_auto(self):
         self.bm.state.update(stage="verified", auto=True)

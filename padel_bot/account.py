@@ -21,6 +21,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import secure
 from .playtomic import PlaytomicError
 
 APP_API = "https://api.app.playtomic.io"
@@ -72,16 +73,21 @@ class PlaytomicAccount:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self.token_path.read_text(encoding="utf-8"))
+            stored = self.token_path.read_text(encoding="utf-8")
+            token = json.loads(secure.unprotect(stored))
         except (OSError, ValueError):
-            return {}
+            return {}  # missing, damaged, or encrypted for another Windows user/PC: log in again
+        if not secure.is_protected(stored) and token:
+            self._save(token)  # older plain file: encrypt it now
+        return token
 
     def _save(self, token: dict) -> None:
         keep = {k: token.get(k) for k in ("access_token", "refresh_token", "access_token_expiration",
                                           "refresh_token_expiration", "user_id")}
         tmp = self.token_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(keep, indent=1), encoding="utf-8")
+        tmp.write_text(secure.protect(json.dumps(keep)), encoding="utf-8")
         os.replace(tmp, self.token_path)
+        secure.restrict(self.token_path)
         self.token = keep
 
     @property

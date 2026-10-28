@@ -401,6 +401,18 @@ class BookingManager:
         except Exception as exc:
             log.error("Could not send: %s", exc)
 
+    def spent_7d(self) -> float:
+        """What the bot paid (your shares) in the last 7 days."""
+        since = self.clock() - timedelta(days=7)
+        total = 0.0
+        for b in self.state["bookings"]:
+            try:
+                if datetime.fromisoformat(b["at"]) >= since:
+                    total += float(b.get("paid", self.share(float(b.get("price") or 0))))
+            except (KeyError, ValueError):
+                continue
+        return total
+
     def bookings_on(self, day) -> list[dict]:
         return [b for b in self.state["bookings"] if b["day"] == day.isoformat()]
 
@@ -429,6 +441,10 @@ class BookingManager:
         if auto:
             if self.stage != "verified" or not self.state.get("auto"):
                 return "Automatic booking is off."
+            spent, share = self.spent_7d(), self.share(slot.price_eur)
+            if rules.max_spend_7d and spent + share > rules.max_spend_7d:
+                return (f"Money brake: €{spent:.2f} already paid by the bot in 7 days, limit "
+                        f"€{rules.max_spend_7d:g} (config.toml max_spend_7d).")
             if (slot.start - now) < timedelta(hours=rules.auto_min_hours):
                 return f"Less than {rules.auto_min_hours}h ahead - automatic booking only when cancellable for free."
         return None
@@ -475,7 +491,8 @@ class BookingManager:
             matches = f"{len(self.booker.my_matches(self.clock().astimezone(timezone.utc)))} upcoming booking(s) found"
         except PlaytomicError as exc:
             matches = f"couldn't read your bookings ({exc})"
-        self._log(kind="test", slot=slot.key, intent_keys=sorted(intent), intent=intent)
+        self._log(kind="test", slot=slot.key, intent_keys=sorted(intent), money=money,
+                  methods=self.booker.method_shapes(intent))
         wallet = self._note_wallet(intent)
         if self.stage == "new":
             self.state["stage"] = "tested"
@@ -596,7 +613,7 @@ class BookingManager:
                     reply = self.booker.get_intent(intent_id)
                 except PlaytomicError:
                     reply = {}
-                self._log(kind="book", mode=mode, slot=slot.key, method=kind, reply=reply, trace=trace)
+                self._log(kind="book", mode=mode, slot=slot.key, method=kind, status=self.booker.status(reply), match=self.booker.match_id(reply), trace=trace)
                 return self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
             if status in self.booker.FINAL_FAIL or status == "NOT_ACCEPTED":
                 fresh_needed = status != "NOT_ACCEPTED"
@@ -612,7 +629,7 @@ class BookingManager:
                     continue  # payment refused: nothing charged, next method
                 raise UnclearOutcome(f"I don't know whether the booking went through ({exc}).") from None
             trace.append(f"{METHOD_NAMES.get(kind, kind)} confirm→{self.booker.status(reply) or 'ok'}")
-            self._log(kind="book", mode=mode, slot=slot.key, method=kind, reply=reply, trace=trace)
+            self._log(kind="book", mode=mode, slot=slot.key, method=kind, status=self.booker.status(reply), match=self.booker.match_id(reply), trace=trace)
             if self.booker.needs_action(reply):
                 return Outcome(False, f"💳 Playtomic needs you to confirm the payment ({METHOD_NAMES.get(kind, kind)}). "
                                       "Open the Playtomic app to finish it - the slot may already be held for you.")
@@ -640,6 +657,7 @@ class BookingManager:
         self.state["bookings"].append({
             "key": slot.key, "day": slot.start.date().isoformat(), "start": slot.start.isoformat(),
             "court": slot.court_name, "price": price or slot.price_eur, "match_id": match_id,
+            "paid": round(self.share(price or slot.price_eur), 2),
             "mode": mode, "method": method, "at": now.isoformat()})
         self.state["bookings"] = [b for b in self.state["bookings"]
                                   if datetime.fromisoformat(b["start"]) > now - timedelta(days=60)]
