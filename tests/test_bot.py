@@ -1501,36 +1501,34 @@ class BookingTests(unittest.TestCase):
         self.assertTrue(out.booked, out.text)
         self.assertNotIn("/v1/payment_intents/pi-1/confirmation", [p for _, p, _ in self.acc.calls])
 
-    def test_share_probe_with_wallet_only(self):
-        # Playtomic shows only the court price (45). Wallet 20: more than the share (11.25),
-        # less than the court - so the first booking pays with the wallet only.
-        self.acc.share_field = False
-        self.acc.refuse = {"w-1"}                                  # wallet payment fails ...
-        out = self.bm.book(self.slot(), "tap")
-        self.assertFalse(out.booked)
-        self.assertNotIn("c-9", [b.get("selected_payment_method_id") for m, _, b in self.acc.calls if m == "PATCH"])
-        self.acc.refuse = set()                                    # ... card is never tried in the probe
-        out = self.bm.book(self.slot(day=29), "tap")
+    def test_wallet_when_enough_then_verified(self):
+        self.acc.share_field = False                               # like the real reply: only the court price
+        out = self.bm.book(self.slot(), "tap")                     # wallet 20 >= share 11.25
         self.assertTrue(out.booked, out.text)
         self.assertIn("via club wallet", out.text)
-        self.assertEqual(self.bm.state["share_probe"]["before"], 20.0)
-        # next booking step reads the wallet: 20 - 11.25 = 8.75 -> only the share was taken
-        self.acc.methods[0]["balance"] = {"amount": 8.75}
-        self.bm.test(self.slot(day=30))
+        self.assertNotIn("check in the Playtomic app", out.text)
+        self.acc.methods[0]["balance"] = {"amount": 8.75}           # next reading: 20 - 11.25
+        self.bm.test(self.slot(day=29))
         self.assertTrue(self.bm.state["share_verified"])
         self.assertIn("✅ Verified: Playtomic took only your share (€11.25)", self.telegram.sent[-1])
-        # from now on the card may be used as well
-        self.acc.refuse = {"w-1"}
-        self.bm.state["bookings"] = []
-        self.assertIn("via card", self.bm.book(self.slot(day=31), "tap").text)
 
-    def test_no_share_probe_when_wallet_could_pay_the_whole_court(self):
+    def test_wallet_fails_then_card_automatically(self):
         self.acc.share_field = False
-        self.acc.methods[0]["balance"] = {"amount": 60.0}
-        out = self.bm.book(self.slot(), "tap")
-        self.assertIn("can't act as a safety limit. Stopped before paying; nothing was paid", out.text)
-        self.assertEqual([m for m, _, _ in self.acc.calls], ["POST"])
-        self.assertIn("money: price=45", self.bm.test(self.slot(day=29)))
+        self.acc.refuse = {"w-1"}                                  # e.g. balance changed meanwhile
+        self.bm.state.update(stage="verified", auto=True)
+        out = self.bm.book(self.slot(), "auto")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("via card", out.text)
+        self.assertIn("check in the Playtomic app whether only your share was charged", out.text)
+
+    def test_card_directly_when_wallet_too_low(self):
+        self.acc.share_field = False
+        self.acc.methods[0]["balance"] = {"amount": 5.0}            # less than the share
+        self.bm.state.update(stage="verified", auto=True)
+        out = self.bm.book(self.slot(), "auto")
+        self.assertTrue(out.booked, out.text)
+        self.assertIn("via card", out.text)
+        self.assertEqual([b["selected_payment_method_id"] for m, _, b in self.acc.calls if m == "PATCH"], ["c-9"])
 
     def test_whole_court_charge_detected(self):
         self.acc.share_field = False
@@ -1750,8 +1748,9 @@ class OpeningTests(unittest.TestCase):
         self.bm.state["wallet"] = {"balance": 11.84, "at": "2026-10-27T14:02:00+01:00"}
         self.now = datetime(2026, 10, 27, 17, 0, tzinfo=TZ)
         self.sn.wallet_check()
-        self.assertIn("💰 Wallet padel amigos: €11.84 (as of Tue 14:02). About €17.50 is needed for Tue 10 Nov 19:30 "
-                      "(opens Tue 19:30)", self.telegram.sent[-1])                  # €70 limit / 4 players
+        self.assertIn("💰 Wallet padel amigos: €11.84 (as of Tue 14:02).\nYour share for Tue 10 Nov 19:30 "
+                      "(opens Tue 19:30) is about €17.50 → top up at least €5.66 to pay from the wallet; "
+                      "otherwise I'll pay by card automatically.", self.telegram.sent[-1])   # €70 limit / 4 players
         self.sn.wallet_check()
         self.assertEqual(sum("💰" in m for m in self.telegram.sent), 1)              # once a day
         self.bm.state["wallet"]["balance"] = 30

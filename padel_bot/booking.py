@@ -563,43 +563,21 @@ class BookingManager:
                 raise BookingError(f"Playtomic doesn't offer {METHOD_NAMES.get(chosen, chosen)} for this booking.")
         probe = None
         unverified_card = False
-        if chosen == "CREDIT_CARD" and self.rules.split_payment and not self.state.get("share_verified"):
-            # You picked the card yourself on the confirmation screen (which warned you):
-            # go ahead, but say clearly that the amount must be checked in the app.
-            labelled = self.booker.explicit_share(intent)
-            share = (price or slot.price_eur) / self.rules.players
-            if labelled is not None and labelled > share * 1.25:
-                raise BookingError(f"Playtomic would charge €{labelled:g} - not just your share (€{share:.2f}). "
-                                   "Stopped before paying; nothing was paid.")
-            unverified_card = labelled is None
-        elif self.rules.split_payment and not self.state.get("share_verified"):
-            # Safety: only ever pay your share. Until a booking has shown that Playtomic
-            # takes only your share, pay with the club wallet only - and only while it
-            # holds more than your share but less than the whole court, so a whole-court
-            # charge simply fails (nothing paid). The next wallet reading verifies it.
-            full = price or slot.price_eur
-            share = full / self.rules.players
-            labelled = self.booker.explicit_share(intent)
-            if labelled is not None and labelled > share * 1.25:
-                raise BookingError(f"Playtomic would charge €{labelled:g} - not just your share (€{share:.2f}). "
-                                   "Stopped before paying; nothing was paid.")
-            if labelled is None:
-                wallet = [m for m in methods if m[0] == "MERCHANT_WALLET"]
-                if wallet and wallet_before is not None and share <= wallet_before < full * 0.95:
-                    methods, probe = wallet, {"before": wallet_before, "share": share, "full": full}
-                else:
-                    money = ", ".join(f"{w}={a:g}" for w, a in self.booker.amount_fields(intent))[:300]
-                    self._log(kind="book", mode=mode, slot=slot.key, stopped="share unclear", money=money)
-                    if wallet_before is not None and wallet_before < share:
-                        why = "your club wallet has less than your share"
-                    elif wallet_before is not None:
-                        why = "your club wallet holds the whole court price, so it can't act as a safety limit"
-                    else:
-                        why = "I can't see your wallet balance"
-                    raise BookingError(
-                        f"Not sure yet that Playtomic takes only your share (€{share:.2f}), and {why}. "
-                        "Stopped before paying; nothing was paid.\n"
-                        f"For Claude - money: {money or 'none found'}")
+        full = price or slot.price_eur
+        share = full / self.rules.players if self.rules.split_payment else full
+        labelled = self.booker.explicit_share(intent) if self.rules.split_payment else None
+        if labelled is not None and labelled > share * 1.25:
+            raise BookingError(f"Playtomic would charge €{labelled:g} - not just your share (€{share:.2f}). "
+                               "Stopped before paying; nothing was paid.")
+        if not chosen and wallet_before is not None and wallet_before < share - 0.01:
+            # Known not to be enough: don't lose seconds on a wallet attempt, pay by card.
+            methods = [m for m in methods if m[0] != "MERCHANT_WALLET"] or methods
+        if self.rules.split_payment and not self.state.get("share_verified") and labelled is None:
+            # Not yet verified that Playtomic takes only your share. A wallet payment is
+            # checked at the next wallet reading; a card payment you check in the app.
+            if wallet_before is not None and any(m[0] == "MERCHANT_WALLET" for m in methods):
+                probe = {"before": wallet_before, "share": share, "full": full}
+            unverified_card = True
         if not methods:
             offered = ", ".join(t for t, _ in self.booker.methods(intent)) or "none"
             raise BookingError(f"None of your payment methods is offered (Playtomic offers: {offered}).")
@@ -641,11 +619,11 @@ class BookingManager:
             if self.booker.status(reply) in self.booker.FINAL_FAIL:
                 fresh_needed = True
                 continue
-            if probe is not None:
+            if probe is not None and kind == "MERCHANT_WALLET":
                 self.state["share_probe"] = probe
                 self._save()
             outcome = self._success(slot, mode, kind, self.booker.match_id(reply), price, wallet_before)
-            if unverified_card:
+            if unverified_card and kind != "MERCHANT_WALLET":
                 outcome.text += ("\n\n💳 Paid by card: please check in the Playtomic app whether only your share "
                                  "was charged (the bot can't see card amounts).")
             return outcome

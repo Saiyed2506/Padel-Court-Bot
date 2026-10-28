@@ -155,6 +155,11 @@ class Watcher:
         ]
         if self.settings.min_notice_min:
             lines.append(f"⏱ Only games at least {self.settings.min_notice_min // 60}h ahead (free cancellation buffer).")
+        wallet = self.bookings.state.get("wallet") if self.bookings is not None else None
+        if wallet:
+            when = datetime.fromisoformat(wallet["at"]).strftime("%a %H:%M")
+            lines.append(f"💰 Club wallet: €{wallet['balance']:.2f} (as of {when}) - "
+                         "the bot pays from it when it covers your share, otherwise by card.")
         if events is not None and events.open_play_problem:
             lines.append(f"⚠️ {events.open_play_problem}")
         return "\n".join(lines)

@@ -186,9 +186,10 @@ class OpeningSniper:
             return
         o = soon[0]
         when = datetime.fromisoformat(wallet["at"]).strftime("%a %H:%M")
-        self._send(f"💰 Wallet {self.watcher.club.name}: €{wallet['balance']:.2f} (as of {when}). About €{need:.2f} "
-                   f"is needed for {format_day(datetime(o.day.year, o.day.month, o.day.day))} {hhmm(o.start_min)} "
-                   f"(opens {o.at.strftime('%a %H:%M')}) - if it's not enough by then, the bot pays with your card.")
+        self._send(f"💰 Wallet {self.watcher.club.name}: €{wallet['balance']:.2f} (as of {when}).\n"
+                   f"Your share for {format_day(datetime(o.day.year, o.day.month, o.day.day))} {hhmm(o.start_min)} "
+                   f"(opens {o.at.strftime('%a %H:%M')}) is about €{need:.2f} → top up at least "
+                   f"€{need - wallet['balance']:.2f} to pay from the wallet; otherwise I'll pay by card automatically.")
         self.wallet_warned = now.date()
 
     def _send(self, text: str, silent: bool = False) -> None:
