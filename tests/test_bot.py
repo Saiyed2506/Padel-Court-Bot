@@ -1178,6 +1178,16 @@ class AlertExtrasTests(MenuBase):
         self.client.replies["2026-10-28"] = []
         self.assertIsNone(self.watcher.fresh_slot(held))
 
+    def test_fresh_slot_ignores_wishes(self):
+        # Sat 31 Oct 19:30 isn't in any wish (weekend wish ends 12:30) - still bookable from an alert
+        self.client.replies["2026-10-31"] = [avail("c1", "2026-10-31", ("18:30:00", 90, "63 EUR")),
+                                             avail("out", "2026-10-31", ("18:30:00", 90, "40 EUR"))]
+        alerted = Slot("c1", "Court 1", datetime(2026, 10, 31, 19, 30, tzinfo=TZ), 90, 63.0, "63 EUR")
+        fresh = self.watcher.fresh_slot(alerted)
+        self.assertEqual((fresh.resource_id, fresh.price_eur), ("c1", 63.0))
+        self.client.replies["2026-10-31"] = [avail("out", "2026-10-31", ("18:30:00", 90, "40 EUR"))]
+        self.assertIsNone(self.watcher.fresh_slot(alerted))     # outdoor courts never count
+
     def test_list_alert_grouped_with_buttons(self):
         from padel_bot.booking import BookingManager, PlaytomicBooker
         tmp = Path(self.tmp.name)

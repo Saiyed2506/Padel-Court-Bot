@@ -12,7 +12,7 @@ from typing import Callable
 from .config import Settings
 from .notify import NotifyError, booking_link, build_messages, format_slot
 from .playtomic import Club, PlaytomicClient, PlaytomicError
-from .rules import Slot, find_matches, parse_availability
+from .rules import Slot, court_is_wanted, find_matches, parse_availability
 from .state import SeenState
 from .timeutil import format_day, minutes_of_day
 
@@ -101,11 +101,15 @@ class Watcher:
     def fresh_slot(self, slot: Slot) -> Slot | None:
         """Re-read that day right before booking: the same court if it's still
         free, otherwise another free court at the same time and length."""
+        # Read the club's real availability - not filtered by your wishes, so a slot
+        # from an alert can still be booked after you've removed the wish.
         try:
-            matches = self.fetch_matches(slot.start.date(), self.clock())
+            raw = self.client.get_availability(self.club.tenant_id, slot.start.date())
         except PlaytomicError:
             return None
-        same_time = [m for m in matches if m.start == slot.start and m.duration == slot.duration]
+        slots = parse_availability(raw, self.courts, self.tz, self.settings.api_times_utc)
+        same_time = [m for m in slots if m.start == slot.start and m.duration == slot.duration
+                     and court_is_wanted(self.courts.get(m.resource_id), self.settings)]
         same_time.sort(key=lambda m: m.resource_id != slot.resource_id)
         return same_time[0] if same_time else None
 
