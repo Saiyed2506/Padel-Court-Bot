@@ -411,10 +411,18 @@ class CommandCenter:
                 reply = "Sorry, something went wrong with that command."
             if reply is None:
                 continue
+            buttons = None
+            if self.menu is not None and not in_login and self._about_wishes(text):
+                buttons = self.menu.wish_buttons()  # ✏️ edit / 🗑 delete right under the answer
             try:
-                self.notifier.send(reply)
+                self.notifier.send(reply, buttons=buttons)
             except NotifyError as exc:
                 log.error("Could not answer the command: %s", exc)
+
+    @staticmethod
+    def _about_wishes(text: str) -> bool:
+        command = text.strip().split(maxsplit=1)[0].lower().split("@", 1)[0] if text.strip() else ""
+        return command in ("/wish", "/wishes", "/remove", "/reset") or looks_like_date_wish(text)
 
     def listen(self, seconds: float) -> None:
         """Wait up to `seconds`, answering commands meanwhile. Returns early

@@ -176,7 +176,7 @@ Tap **🎾 Menu** at the bottom of the chat (or send `/menu`):
 | ➕ Court wish | Every week: pick days → earliest start → latest start → length |
 | 📅 One-time wish | One date only (e.g. Tue 4 Nov 17:00); removed after that day |
 | 🎫 Event | Watched event names and their dates; add or remove names |
-| 📋 My wishes | Everything you watch, each with a 🗑 delete button |
+| 📋 My wishes | Everything you watch: ✏️ edit any wish (days/date in a calendar, length, times, ⭐ favourites) or 🗑 delete it |
 | 👥 Friends | Invite link, approve or decline requests, remove friends |
 | ⚙️ Settings | Pause, only ⭐ times, night pause, Playtomic log in/out |
 | 📖 Guide | Short explanation |

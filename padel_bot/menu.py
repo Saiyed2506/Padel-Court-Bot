@@ -42,6 +42,7 @@ GUIDE = """📖 How the padel bot works
 
 ➕ Court wish: every week - pick days, length (60-150 min), earliest and latest start.
 📅 One-time wish: pick a day in the calendar, then length and times. It disappears after that day.
+📋 My wishes: ✏️ change any wish (days/date, length, times, ⭐ favourites) or 🗑 delete it.
 🎫 Event: watch events by name (Newcomer, Afterwork): new dates, free spots, Sunday overview.
 👥 Friends: friends open this bot and tap Start; you approve them and they get the same alerts.
 ⚙️ Settings: pause, quiet hours, only ⭐ times, Playtomic login.
@@ -142,6 +143,7 @@ class Menu:
             "s": self._pick_start,
             "l": self._pick_last, "u": self._pick_length, "ok": self._confirm,
             "mw": self._go_wishes, "dw": self._delete_wish, "de": self._delete_word,
+            "ew": self._edit_wish, "ex": self._review_action, "fs": self._toggle_star,
             "ev": self._go_events, "ea": self._add_word,
             "fr": self._go_friends, "fa": self._friend_approve, "fd": self._friend_decline,
             "fx": self._friend_remove,
@@ -193,7 +195,10 @@ class Menu:
         if arg == "ok":
             if not days:
                 return "Pick at least one day"
-            self._length_screen(mid)
+            if self.flow.get("review"):
+                self._review_screen(mid)
+            else:
+                self._length_screen(mid)
             return None
         if arg == "wk":
             days = set(DAY_KEYS[:5])
@@ -259,7 +264,10 @@ class Menu:
         if picked < self.watcher.clock().date():
             return "That day is over"
         self.flow["date"] = picked.isoformat()
-        self._length_screen(mid)
+        if self.flow.get("review"):
+            self._review_screen(mid)
+        else:
+            self._length_screen(mid)
 
     # --- shared steps: length, earliest start, latest start --------------------------
 
@@ -282,6 +290,13 @@ class Menu:
         if arg not in ("60", "90", "120", "150") or not (self.flow.get("days") or self.flow.get("date")):
             return "Start again from 🎾 Menu"
         self.flow["duration"] = int(arg)
+        if self.flow.get("review") and "start" in self.flow:
+            # keep the times, only pull them earlier if the game would end after midnight
+            latest = 24 * 60 - self.flow["duration"]
+            self.flow["last"] = min(self.flow["last"], latest)
+            self.flow["start"] = min(self.flow["start"], self.flow["last"])
+            self._review_screen(mid)
+            return
         self.flow.pop("start", None)
         self.flow.pop("last", None)
         self._start_screen(mid)
@@ -313,10 +328,117 @@ class Menu:
             return "Start again from 🎾 Menu"
         self.flow["last"] = max(int(arg), self.flow["start"])
         try:
-            window = self._build_window()
+            self._build_window()
         except ValueError as exc:
             return str(exc)
-        self._screen(mid, f"Add this wish?\n\n{describe(window)}", [[("✅ Add this wish", "ok"), ("✖ Cancel", "x")]])
+        self._review_screen(mid)
+
+    # --- review / edit: change any part before saving ------------------------------
+
+    def _review_screen(self, mid):
+        """The wish as it is now, with a button for each part you can still change."""
+        self.flow["review"] = True
+        window = self._build_window()
+        when = ("📅 Date", "ex:d") if self.flow.get("kind") == "once" else ("📆 Days", "ex:d")
+        change = [[when, ("⏱ Length", "ex:u")], [("🕐 Times", "ex:t"), ("⭐ Favourites", "ex:f")]]
+        edit = self.flow.get("edit")
+        if edit:
+            index, check = edit
+            text = (f"✏️ Edit wish {index + 1}\n\nBefore: {self.flow['before']}\nNow:    {describe(window)}\n\n"
+                    "Tap what to change, then Save.")
+            buttons = [[("✅ Save changes", "ex:s")]] + change + [[("🗑 Delete", f"dw:{index}:{check}"), ("✖ Cancel", "mw")]]
+        else:
+            text = f"Add this wish?\n\n{describe(window)}\n\nOr change something first:"
+            buttons = [[("✅ Add this wish", "ok")]] + change + [[("✖ Cancel", "x")]]
+        self._screen(mid, text, buttons)
+
+    def _review_action(self, arg, mid):
+        if not self.flow.get("review"):
+            return "Start again from 🎾 Menu"
+        if arg == "d":
+            if self.flow.get("kind") == "once":
+                picked = date.fromisoformat(self.flow["date"])
+                today = self.watcher.clock().date()
+                shown = max(picked, today)
+                self._calendar_screen(mid, shown.year, shown.month)
+            else:
+                self._days_screen(mid)
+        elif arg == "u":
+            self._length_screen(mid)
+        elif arg == "t":
+            self._start_screen(mid)
+        elif arg == "f":
+            self._stars_screen(mid)
+        elif arg == "r":
+            self._review_screen(mid)
+        elif arg == "s":
+            return self._save_edit(mid)
+        else:
+            return "Unknown button"
+
+    def _starts_in_range(self) -> list[int]:
+        return list(range(self.flow["start"], self.flow["last"] + 1, 30))
+
+    def _stars(self) -> set[int]:
+        if "stars" in self.flow:
+            return set(self.flow["stars"])
+        return {self.flow["start"]} if self.flow["start"] == self.flow["last"] else set()
+
+    def _stars_screen(self, mid):
+        stars = self._stars()
+        times = self._starts_in_range()
+        rows = [[(("⭐ " if t in stars else "") + hhmm(t), f"fs:{t}") for t in times[i:i + 4]]
+                for i in range(0, len(times), 4)]
+        rows.append([("No favourites", "fs:none"), ("✅ Done", "ex:r")])
+        self._screen(mid, f"{self._flow_title()}\n⭐ Favourite start times: tap to mark.\n"
+                          "Favourites ring loudly, the rest arrive silently; ⚡ booking at opening "
+                          "only grabs favourites when you have some.", rows)
+
+    def _toggle_star(self, arg, mid):
+        if not self.flow.get("review"):
+            return "Start again from 🎾 Menu"
+        if arg == "none":
+            self.flow["stars"] = []
+        elif arg.isdigit() and int(arg) in self._starts_in_range():
+            self.flow["stars"] = sorted(self._stars() ^ {int(arg)})
+        else:
+            return "That time isn't in this wish any more"
+        self._stars_screen(mid)
+
+    def _edit_wish(self, arg, mid):
+        index, _, check = arg.partition(":")
+        windows = list(self.watcher.settings.windows)
+        if not index.isdigit() or int(index) >= len(windows) or _short_hash(describe(windows[int(index)])) != check:
+            self._go_wishes("", mid)
+            return "That list was outdated - here's the current one"
+        w = windows[int(index)]
+        duration = min(w.durations)
+        self.flow = {"kind": "once" if w.on_date else "recurring",
+                     "days": sorted(w.days, key=DAY_KEYS.index),
+                     "duration": duration, "start": w.start_min, "last": max(w.start_min, w.end_min - duration),
+                     "stars": sorted(w.preferred_starts), "edit": (int(index), check), "before": describe(w)}
+        if w.on_date:
+            self.flow["date"] = w.on_date.isoformat()
+        self._review_screen(mid)
+
+    def _save_edit(self, mid):
+        index, check = self.flow["edit"]
+        windows = list(self.watcher.settings.windows)
+        if index >= len(windows) or _short_hash(describe(windows[index])) != check:
+            self.flow = {}
+            self._go_wishes("", mid)
+            return "That list changed meanwhile - here's the current one"
+        try:
+            window = self._build_window()
+        except (KeyError, ValueError) as exc:
+            return str(exc) or "Start again from 🎾 Menu"
+        windows[index] = window
+        self.center.set_windows(windows)
+        self.flow = {}
+        note = soon_warning(window, self.watcher.clock(), self.watcher.settings.free_cancel_min)
+        self._screen(mid, f"✅ Saved: {describe(window)}\nI'll check it in a moment.{note}\n\n{self._wishes_text()}",
+                     self._wish_buttons())
+        return "Saved"
 
     def _starts_text(self) -> str:
         start, last = self.flow["start"], self.flow.get("last", self.flow["start"])
@@ -328,10 +450,10 @@ class Menu:
         end = f["last"] + duration
         if end > 24 * 60:
             raise ValueError("the game would end after midnight")
-        exact = f["last"] == f["start"]
+        stars = frozenset(t for t in self._stars() if f["start"] <= t <= f["last"])
         return Window(days=frozenset(f.get("days") or DAY_KEYS), start_min=f["start"], end_min=end,
                       durations=frozenset({duration}),
-                      preferred_starts=frozenset({f["start"]}) if exact else frozenset(),
+                      preferred_starts=stars,
                       on_date=date.fromisoformat(f["date"]) if f.get("kind") == "once" else None)
 
     def _confirm(self, arg, mid):
@@ -380,7 +502,8 @@ class Menu:
     def _wish_buttons(self):
         rows = []
         for i, w in enumerate(self.watcher.settings.windows):
-            rows.append([(f"🗑 {i + 1}. {describe(w)[:40]}", f"dw:{i}:{_short_hash(describe(w))}")])
+            check = _short_hash(describe(w))
+            rows.append([(f"✏️ {i + 1}. {describe(w)[:36]}", f"ew:{i}:{check}"), ("🗑", f"dw:{i}:{check}")])
         words = self.watcher.events.words.load() if self.watcher.events else []
         for i, w in enumerate(words):
             rows.append([(f"🗑 E{i + 1}. {w[:40]}", f"de:{i}:{_short_hash(w)}")])
@@ -396,7 +519,11 @@ class Menu:
     def _go_wishes(self, arg, mid):
         self._screen(mid, self._wishes_text(), self._wish_buttons())
 
+    def wish_buttons(self):
+        return self._wish_buttons()
+
     def _delete_wish(self, arg, mid):
+        self.flow = {}
         index, _, check = arg.partition(":")
         windows = list(self.watcher.settings.windows)
         if not index.isdigit() or int(index) >= len(windows) or _short_hash(describe(windows[int(index)])) != check:

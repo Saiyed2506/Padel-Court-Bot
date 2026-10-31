@@ -439,6 +439,7 @@ class SetupWizardTests(unittest.TestCase):
                  mock.patch("builtins.print"), \
                  mock.patch.object(setup_wizard.TelegramNotifier, "_call", fake_call), \
                  mock.patch.object(setup_wizard.PlaytomicClient, "get_club_page", fake_page), \
+                 mock.patch.object(setup_wizard, "_clear_screen", lambda: None), \
                  mock.patch.dict("os.environ", {}, clear=False):
                 self.assertEqual(setup_wizard.run_setup(config, lambda days: checked.append(days)), 0)
             env = (Path(tmp) / ".env").read_text(encoding="utf-8")
@@ -1162,6 +1163,51 @@ class MenuTests(MenuBase):
         word = [d for row in self.last_screen()["buttons"] for _, d in row if d.startswith("de:0:")][0]
         self.assertIn("Stopped watching 'Newcomer'", self.tap(word))
         self.assertEqual(self.watcher.events.words.load(), [])
+
+    def test_edit_wish_keeps_the_rest(self):
+        self.tap("mw")
+        edit = [d for row in self.last_screen()["buttons"] for _, d in row if d.startswith("ew:0:")][0]
+        self.tap(edit)
+        self.assertIn("Edit wish 1", self.last_screen()["text"])
+        self.assertIn("Now:    Mon-Fri 16:00-20:30 (starts 16:00-19:00), 90 min, ⭐ 16:30 17:00", self.last_screen()["text"])
+        self.tap("ex:u")
+        self.tap("u:120")                                    # length only: times and ⭐ stay
+        self.assertIn("Now:    Mon-Fri 16:00-21:00 (starts 16:00-19:00), 120 min, ⭐ 16:30 17:00",
+                      self.last_screen()["text"])
+        self.tap("ex:f")
+        self.assertIn("⭐ 16:30", self.labels())
+        self.tap(f"fs:{17 * 60}")                            # un-star 17:00
+        self.tap(f"fs:{18 * 60}")                            # star 18:00
+        self.tap("ex:r")
+        self.tap("ex:d")
+        self.tap("d:fri")                                    # drop Friday
+        self.tap("d:ok")                                     # back to the edit screen, not the length step
+        self.assertIn("Now:    Mon, Tue, Wed, Thu 16:00", self.last_screen()["text"])
+        self.assertEqual(self.tap("ex:s"), "Saved")
+        windows = self.watcher.settings.windows
+        self.assertEqual(len(windows), 2)                    # replaced, not added
+        self.assertEqual((windows[0].durations, windows[0].preferred_starts),
+                         (frozenset({120}), frozenset({16 * 60 + 30, 18 * 60})))
+        self.assertNotIn("fri", windows[0].days)
+        self.assertEqual(self.store.load()[0], windows[0])  # saved
+        self.assertIn("outdated", self.tap(edit))            # old button: safe
+
+    def test_new_wish_can_be_changed_before_adding_and_typed_wish_gets_buttons(self):
+        self.tap("ow")
+        self.tap("dt:2026-11-14")
+        self.tap("u:90")
+        self.tap(f"s:{9 * 60}")
+        self.tap(f"l:{10 * 60 + 30}")
+        self.assertIn("Add this wish?", self.last_screen()["text"])
+        self.tap("ex:t")                                     # change the times
+        self.tap(f"s:{9 * 60}")
+        self.tap(f"l:{9 * 60}")
+        self.assertIn("Sat 14 Nov (once) 09:00-10:30, 90 min", self.last_screen()["text"])
+        self.assertEqual(self.tap("ok"), "Added")
+        self.cc.process([message(5, "15.11.2026 10:00-11:00")])
+        reply = self.telegram.outbox[-1]
+        self.assertIn("✅ Added", reply["text"])
+        self.assertTrue(any(label.startswith("✏️") for row in reply["buttons"] for label, _ in row))
 
     def test_add_event_name_by_typing(self):
         self.tap("ev")
