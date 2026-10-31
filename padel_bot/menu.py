@@ -150,6 +150,7 @@ class Menu:
             "sb": self._cycle_buffer, "sr": self._toggle_report,
             "md": self._mute_day, "um": self._unmute_day, "rb": self._remove_booking,
             "so2": self._toggle_snipe, "bt": self._test_booking, "bb": self._ask_booking, "by": self._do_booking, "sa": self._toggle_auto,
+            "su": self._unlock_auto, "un": self._unlock_no,
         }.get(key)
         if handler is None:
             return "This button is from an older version - tap 🎾 Menu."
@@ -714,11 +715,40 @@ class Menu:
         bookings = self.watcher.bookings
         if bookings is None:
             return "Booking isn't set up"
+        if bookings.stage != "verified":
+            return self._ask_unlock(bookings)
         toast = bookings.set_auto(not bookings.auto_on)
         if bookings.auto_on:
             bookings.auto_book(self.watcher.current_matches())  # also slots already found
         self._go_settings("", mid)
         return toast
+
+    def _ask_unlock(self, bookings):
+        rules = bookings.rules
+        self.notifier.send(
+            "🔒 Automatic booking is locked until one booking with a tap (💳) worked.\n\n"
+            "You can unlock it anyway. Then the FIRST real payment happens without you watching:\n"
+            "• not proven yet that Playtomic takes only your share (club wallet: safe, it can't "
+            "pay more than its balance; card: check the amount in the app afterwards)\n"
+            "• if the payment answer is unclear, automatic booking pauses itself\n\n"
+            f"Limits that always apply: court max €{rules.max_price_eur:g}, "
+            f"{rules.max_per_day} booking per day, only games ≥{rules.auto_min_hours}h ahead, "
+            f"max €{rules.max_spend_7d:g} per 7 days.",
+            buttons=[[("🔓 Unlock anyway + switch on", "su")], [("✖ No, keep it locked", "un")]])
+        return "Read the message below"
+
+    def _unlock_auto(self, arg, mid):
+        bookings = self.watcher.bookings
+        if bookings is None:
+            return "Booking isn't set up"
+        toast = bookings.set_auto(True) if bookings.stage == "verified" else bookings.unlock_untested()
+        bookings.auto_book(self.watcher.current_matches())  # also slots already found
+        self._screen(mid, toast + ". Switch it off any time in ⚙️ Settings.", [])
+        return toast
+
+    def _unlock_no(self, arg, mid):
+        self._screen(mid, "Still locked.", [])
+        return "OK"
 
     def _login(self, arg, mid):
         self.notifier.send(self.center.handle("/login"))

@@ -3,7 +3,7 @@
   1. 🧪 Test: start a booking for a real slot but do NOT confirm it. Shows the
      price and the payment methods Playtomic offers you. Nothing is paid.
   2. 💳 One booking with a tap (and a "Yes, book" confirmation).
-  3. 🤖 Automatic: only unlockable after stage 2 worked; switched on in Settings.
+  3. 🤖 Automatic: unlocked by stage 2 (or 🔓 Unlock anyway); switched on in Settings.
 
 Safety rules (BookingSettings, config.toml [booking]):
   * never above max_price_eur (whole-court price), never a slot that has started
@@ -348,6 +348,14 @@ class BookingManager:
         self.state["auto"] = on
         self._save()
         return "🤖 Automatic booking ON" if on else "🤖 Automatic booking off"
+
+    def unlock_untested(self) -> str:
+        """Your choice: skip the one tap booking. The first real payment then
+        happens without you watching; every money limit still applies."""
+        self.state.update(stage="verified", auto=True, unlocked_untested=True)
+        self._log(kind="unlock", untested=True)
+        self._save()
+        return "🔓 Unlocked - 🤖 Automatic booking ON"
 
     def share(self, price: float) -> float:
         rules = self.rules

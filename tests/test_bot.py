@@ -1247,7 +1247,7 @@ class AlertExtrasTests(MenuBase):
         from padel_bot.polls import Polls
         from padel_bot.reminders import Reminders
         tmp = Path(self.tmp.name)
-        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends)
+        self.watcher.polls = Polls(tmp / "polls.json", self.bc, self.friends, clock=self.watcher.clock)
         self.watcher.reminders = Reminders(tmp / "reminders.json", self.bc, self.s.free_cancel_min)
         self.telegram.chat_first_name = lambda chat_id: "Mo"
         self.friends.pending["777"] = "Ali (@ali_p)"
@@ -1758,6 +1758,21 @@ class BookingMenuTests(MenuBase):
         self.assertIn("check in the Playtomic app whether only your share was charged", self.telegram.edits[-1]["text"])
         patch = [b for m, _, b in self.acc.calls if m == "PATCH"][-1]
         self.assertEqual(patch["selected_payment_method_id"], "c-9")
+
+    def test_unlock_anyway_needs_explicit_confirmation(self):
+        bm = self.watcher.bookings
+        bm.state["stage"] = "tested"
+        self.assertEqual(self.tap("sa"), "Read the message below")   # locked: asks first
+        ask = self.telegram.outbox[-1]
+        self.assertIn("FIRST real payment happens without you watching", ask["text"])
+        self.assertIn("max €120 per 7 days", ask["text"])
+        self.assertFalse(bm.auto_on)
+        self.tap("un")                                                # "No": stays locked
+        self.assertFalse(bm.auto_on)
+        self.assertIn("ON", self.tap("su"))                          # explicit unlock
+        self.assertTrue(bm.auto_on)
+        self.assertTrue(bm.state["unlocked_untested"])
+        self.assertIn("off", self.tap("sa"))                          # normal switch from now on
 
 class OpeningTests(unittest.TestCase):
     def setUp(self):

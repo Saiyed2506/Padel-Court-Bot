@@ -211,6 +211,8 @@ Needs your Playtomic login (`/login`). Unlocked step by step:
    not confirm it - shows price and payment options. Nothing is paid.
 2. **💳 Book** → **✅ Yes, book**: one real booking with your tap.
 3. **🤖 Automatic booking** (⚙️ Settings): books new matching slots by itself.
+   Locked until step 2 worked once; you can skip that with **🔓 Unlock anyway**
+   (after a warning) - the first real payment then happens unattended.
 4. **⚡ Book at opening** (⚙️ Settings): courts open 14 days ahead, every
    30 minutes (today 19:30 → the 19:30 slot in 14 days). The bot prepares
    ~40 s before each opening that matches a wish and books at +1 s; if the
