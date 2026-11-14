@@ -1,0 +1,33 @@
+# Jarvis settings. No secrets in here - those go in .env.
+# After changing something, close the Jarvis window and start run-jarvis.bat again.
+
+[jarvis]
+# What Jarvis calls you. Filled in by JARVIS-SETUP.bat.
+your_name = ""
+# Your city: used for weather and "near me" web searches. Leave empty to skip.
+city = ""
+
+# The Claude model that acts as Jarvis' brain.
+#   claude-opus-5-5   smartest, about $4 / $20 per million tokens in / out (default)
+#   claude-sonnet-5-5 about half the price, still very good for chat
+#   claude-haiku-5-5  much cheaper, noticeably weaker at multi-step tasks
+model = "claude-opus-5-5"
+# How hard Jarvis thinks before answering: "low", "medium" or "high".
+# Higher = better on tricky requests, slower and more expensive.
+effort = "medium"
+
+# Let Jarvis search the internet (news, weather, facts). Each search costs
+# extra (roughly $0.01) on top of the normal token price.
+web_search = true
+
+# Safety brake: Jarvis stops using the AI for the rest of the day once its
+# estimated spend for today reaches this many US dollars. Reminders still fire.
+# Also set a monthly limit in the Anthropic Console (see JARVIS.md) - that one
+# is enforced by Anthropic, this one is only Jarvis' own estimate.
+daily_budget_usd = 1.00
+
+# Jarvis starts a fresh conversation (keeping everything it "remembered")
+# after this many hours of silence, or once a conversation gets this long.
+# Long conversations cost more, because the whole chat is re-sent every time.
+new_conversation_after_hours = 6
+max_conversation_messages = 60

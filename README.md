@@ -1,5 +1,8 @@
 # Padel Court Bot
 
+> **New: Jarvis**, a personal AI assistant on Telegram, lives in this repo too
+> as a separate program. See [JARVIS.md](JARVIS.md).
+
 Watches **Padel Amigos Hamburg-Halstenbek** on Playtomic for free **indoor doubles
 courts** in your time slots, and sends you a **Telegram** message with a link
 as soon as one appears:
@@ -400,6 +403,7 @@ padel_bot/
   timeutil.py   Hamburg time zone (works on Windows without extra packages)
 config.toml     your settings      .env  your secrets (not in git)
 tests/          offline tests: py -m unittest -v
+jarvis/         Jarvis, the personal assistant (see JARVIS.md)
 ```
 
 ## Troubleshooting

@@ -32,3 +32,6 @@ reminders.json.tmp
 bookings_state.json
 bookings_state.json.tmp
 bookings_log.jsonl
+
+# Jarvis runtime data (memories, reminders, conversation, spending)
+jarvis_data/
